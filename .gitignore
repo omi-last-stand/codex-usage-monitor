@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code (local harness / dev settings - not part of the app)
+.claude/settings.json
+.claude/settings.local.json
+.claude/launch.json
+
+# User settings
+usage-monitor-settings.json
+
+# Widget runtime state (window position, written by the app)
+CodexUsageMonitor.ini
+codex-usage-monitor.ini
+
+# Stray tooling artifacts (not part of the app)
+.agents/
+.claude/skills/
+skills-lock.json
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Demo source files (large mp4/gif; only the optimized GIF under docs/images/ is committed)
+demo-movie/

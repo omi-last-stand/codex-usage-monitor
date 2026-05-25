@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<header>
+    <span id="title"></span>
+    <button type="button" id="closeBtn" aria-label="Close">&times;</button>
+</header>
+
+<!-- One flat, reorderable list of blocks. Usage bars are inserted here by JS;
+     the singleton blocks below are positioned and shown/hidden via the saved
+     layout (CSS `order` + the `shown` / `state-collapsed` classes). -->
+<div id="blocks">
+    <section id="accountSection" class="block" data-block="account">
+        <h2 id="headingAccount"></h2>
+        <dl>
+            <div id="emailRow">
+                <dt id="labelEmail"></dt>
+                <dd id="emailValue"></dd>
+            </div>
+            <div id="planRow">
+                <dt id="labelPlan"></dt>
+                <dd id="planValue"></dd>
+            </div>
+        </dl>
+    </section>
+
+    <section id="extraSection" class="block" data-block="extra_usage">
+        <h2 id="headingExtraUsage"></h2>
+        <div class="bar-header">
+            <span id="extraSpent"></span>
+            <span id="extraPct"></span>
+        </div>
+        <div class="bar-container">
+            <div class="bar-fill" id="extraFill"></div>
+        </div>
+    </section>
+
+    <section id="installSection" class="block" data-block="installations">
+        <div class="heading-row">
+            <h2 id="headingClaudeCode"></h2>
+            <span id="changelogLink"></span>
+        </div>
+        <dl id="installRows"></dl>
+    </section>
+
+    <footer id="statusSection" class="block" data-block="status">
+        <span id="statusText"></span>
+        <span id="appVersion"></span>
+    </footer>
+</div>
+
+<ul id="contextMenu" class="context-menu">
+    <li id="menuAlwaysOnTop" class="menu-item"><span class="menu-check">&#10003;</span><span class="menu-label"></span></li>
+    <li id="menuSettings" class="menu-item"><span class="menu-label"></span></li>
+    <li id="menuAbout" class="menu-item"><span class="menu-label"></span></li>
+    <li class="menu-sep"></li>
+    <li id="menuQuit" class="menu-item"><span class="menu-label"></span></li>
+</ul>
+
+<script src="popup.js"></script>
+</body>
+</html>
