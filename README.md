@@ -4,7 +4,7 @@
 > A resident, always-on-top desktop widget that keeps your OpenAI Codex (ChatGPT-plan) rate-limit usage on screen (Windows).
 
 <p align="center">
-  <img src="docs/images/widget-expanded-en.png" width="320" alt="Codex Usage Monitor widget (expanded)">
+  <img src="docs/images/codex-usage-monitor-demo.gif" width="640" alt="Demo: compact and expanded views, always on top">
   <br>
   <sub>コンパクト⇄拡大の切り替えと、常に前面に表示 / Compact ⇄ expanded, always on top</sub>
 </p>
