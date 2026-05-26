@@ -81,5 +81,6 @@
     "credits_unlimited": "无限制",
     "credits_remaining": "剩余 {balance} 积分",
     "status_local_snapshot": "本地快照 · 实时 API 不可用",
-    "replace_failed": "无法替换正在运行的实例——它仍在运行。"
+    "replace_failed": "无法替换正在运行的实例——它仍在运行。",
+    "status_session_mode": "会话模式（本地数据）"
 }

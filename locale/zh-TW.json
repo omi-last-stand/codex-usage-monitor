@@ -81,5 +81,6 @@
     "credits_unlimited": "無限制",
     "credits_remaining": "剩餘 {balance} 點數",
     "status_local_snapshot": "本機快照 · 即時 API 無法使用",
-    "replace_failed": "無法取代執行中的實例——它仍在執行。"
+    "replace_failed": "無法取代執行中的實例——它仍在執行。",
+    "status_session_mode": "工作階段模式（本機資料）"
 }

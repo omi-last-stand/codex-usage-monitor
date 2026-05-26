@@ -202,9 +202,13 @@ def _snapshot_to_dict(
     if snap.profile:
         account = snap.profile.get('account', {})
         org = snap.profile.get('organization', {})
-        # Prefer the live plan from the usage response (rate_limits.plan_type);
-        # the id-token JWT's plan claim can be stale after an upgrade.
-        plan = (snap.usage or {}).get('plan_type') or org.get('organization_type', '')
+        # Plan: prefer the live plan from the usage response (rate_limits.plan_type),
+        # but on unverified local session data do NOT attribute a (possibly foreign)
+        # plan to the current account - leave it blank so the row is hidden.
+        if snap.usage and snap.usage.get('source') == 'session':
+            plan = ''
+        else:
+            plan = (snap.usage or {}).get('plan_type') or org.get('organization_type', '')
         profile = {
             'email': account.get('email', ''),
             'plan': str(plan).replace('_', ' ').title(),
@@ -342,7 +346,7 @@ def _init_config(snap: CacheSnapshot, next_poll_time: float | None = None, *, al
             'claude_code': T['claude_code'], 'changelog': T['changelog'],
             'status_updated_s': T['status_updated_s'], 'status_updated': T['status_updated'],
             'status_next_update': T['status_next_update'], 'status_refreshing': T['status_refreshing'],
-            'status_local_snapshot': T['status_local_snapshot'],
+            'status_local_snapshot': T['status_local_snapshot'], 'status_session_mode': T['status_session_mode'],
             'duration_hm': T['duration_hm'], 'duration_m': T['duration_m'], 'duration_s': T['duration_s'],
             'menu_always_on_top': T['always_on_top'], 'menu_settings': T['settings_title'],
             'menu_about': T['about_title'], 'menu_quit': T['quit'],

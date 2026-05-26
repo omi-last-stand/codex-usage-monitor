@@ -81,5 +81,6 @@
     "credits_unlimited": "Необмежено",
     "credits_remaining": "Залишок: {balance} кредитів",
     "status_local_snapshot": "Локальний знімок · Live API недоступний",
-    "replace_failed": "Не вдалося замінити запущений екземпляр - він досі активний."
+    "replace_failed": "Не вдалося замінити запущений екземпляр - він досі активний.",
+    "status_session_mode": "Режим сесії (локальні дані)"
 }

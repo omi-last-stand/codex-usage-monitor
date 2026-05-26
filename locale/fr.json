@@ -81,5 +81,6 @@
     "credits_unlimited": "Illimité",
     "credits_remaining": "{balance} crédits restants",
     "status_local_snapshot": "Instantané local · API en direct indisponible",
-    "replace_failed": "Impossible de remplacer l'instance en cours : elle est toujours active."
+    "replace_failed": "Impossible de remplacer l'instance en cours : elle est toujours active.",
+    "status_session_mode": "Mode session (données locales)"
 }

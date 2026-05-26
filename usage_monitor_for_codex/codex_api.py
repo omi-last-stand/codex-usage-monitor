@@ -207,11 +207,13 @@ def _fetch_usage_api() -> dict[str, Any]:
     except Exception:
         return {'error': T['connection_error']}
 
-    rate_limits = _locate_rate_limits(payload)
-    if not rate_limits:
+    if not isinstance(payload, dict):
         return {'error': T['no_usage_data']}
-
-    result = transform_rate_limits(rate_limits)
+    # The wham/usage response is a RateLimitStatusPayload with rate_limit /
+    # credits / plan_type at the top level; some deployments may wrap it under
+    # "rate_limits". transform_rate_limits handles either nesting.
+    obj = payload.get('rate_limits') if isinstance(payload.get('rate_limits'), dict) else payload
+    result = transform_rate_limits(obj)
     if not _has_quota(result):
         return {'error': T['no_usage_data']}
     result['source'] = 'api'
@@ -271,17 +273,33 @@ def fetch_profile() -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 def transform_rate_limits(rate_limits: dict[str, Any]) -> dict[str, Any]:
-    """Translate a Codex ``rate_limits`` object into the internal usage model.
+    """Translate a Codex rate-limit object into the internal usage model.
 
-    The ``primary`` / ``secondary`` windows become quota entries keyed by
-    their duration (e.g. ``five_hour`` for a 300-minute window,
-    ``seven_day`` for 10080 minutes), each with ``utilization`` (percent)
-    and an ISO-8601 ``resets_at``.  Windows whose length is not a whole
-    number of hours or days keep the raw ``primary`` / ``secondary`` key.
+    Handles BOTH shapes that carry the same information:
+
+    * the live ``wham/usage`` HTTP response (``RateLimitStatusPayload``) -
+      ``{rate_limit: {primary_window, secondary_window: {used_percent,
+      limit_window_seconds, reset_at}}, credits, plan_type}``; and
+    * the session-file snapshot (``RateLimitSnapshot``) - ``{primary,
+      secondary: {used_percent, window_minutes, resets_at}, credits, plan_type}``.
+
+    Each window becomes a quota entry keyed by its duration (``five_hour`` for a
+    300-minute window, ``seven_day`` for 10080), with ``utilization`` and an
+    ISO-8601 ``resets_at``.  A window whose length is not a whole number of
+    hours or days keeps the raw ``primary`` / ``secondary`` key.
     """
     result: dict[str, Any] = {}
-    for slot in ('primary', 'secondary'):
-        window = rate_limits.get(slot)
+
+    # The HTTP payload nests the windows under "rate_limit" as
+    # "primary_window"/"secondary_window"; the session snapshot puts
+    # "primary"/"secondary" at the top level. Support both.
+    detail = rate_limits.get('rate_limit')
+    if isinstance(detail, dict):
+        slots = (('primary', detail.get('primary_window')), ('secondary', detail.get('secondary_window')))
+    else:
+        slots = (('primary', rate_limits.get('primary')), ('secondary', rate_limits.get('secondary')))
+
+    for slot, window in slots:
         if not isinstance(window, dict):
             continue
         used = window.get('used_percent')
@@ -294,15 +312,15 @@ def transform_rate_limits(rate_limits: dict[str, Any]) -> dict[str, Any]:
         if not math.isfinite(utilization):
             continue
 
-        window_minutes = window.get('window_minutes')
-        key = _window_to_key(window_minutes, slot)
+        minutes = _window_minutes(window)
+        key = _window_to_key(minutes, slot)
         # Avoid clobbering if two windows somehow map to the same key.
         if key in result:
             key = slot
         result[key] = {
             'utilization': utilization,
             'resets_at': _iso_from_window(window),
-            'window_minutes': window_minutes,
+            'window_minutes': minutes,
         }
 
     extra = _credits_to_extra_usage(rate_limits.get('credits'))
@@ -314,6 +332,26 @@ def transform_rate_limits(rate_limits: dict[str, Any]) -> dict[str, Any]:
         result['plan_type'] = plan
 
     return result
+
+
+def _window_minutes(window: dict[str, Any]) -> Any:
+    """Return the window length in minutes from either rate-limit shape.
+
+    Session snapshots carry ``window_minutes`` directly; the HTTP payload
+    carries ``limit_window_seconds`` (converted with ceiling division, matching
+    the official client's ``window_minutes_from_seconds``).
+    """
+    minutes = window.get('window_minutes')
+    if minutes is not None:
+        return minutes
+    seconds = window.get('limit_window_seconds')
+    if seconds is not None:
+        try:
+            secs = int(seconds)
+        except (TypeError, ValueError):
+            return None
+        return (secs + 59) // 60 if secs > 0 else None
+    return None
 
 
 def _window_to_key(window_minutes: Any, fallback: str) -> str:
@@ -342,8 +380,10 @@ def _iso_from_window(window: dict[str, Any]) -> str:
     Accepts an absolute ``resets_at`` (epoch seconds, or milliseconds when
     large) or a relative ``resets_in_seconds`` / ``reset_after_seconds``.
     """
-    absolute = window.get('resets_at')
-    if absolute is not None:
+    for abs_key in ('resets_at', 'reset_at'):
+        absolute = window.get(abs_key)
+        if absolute is None:
+            continue
         try:
             value = float(absolute)
             if value > _MS_THRESHOLD:
@@ -381,6 +421,11 @@ def _credits_to_extra_usage(credits: Any) -> dict[str, Any] | None:
 
     if credits.get('unlimited'):
         return {'is_enabled': True, 'unlimited': True, 'balance': None}
+
+    # No credit balance: an explicit has_credits=false means no row (avoids
+    # showing e.g. "0 credits remaining" for an account without credits).
+    if credits.get('has_credits') is False:
+        return None
 
     balance = credits.get('balance')
     if balance is None or balance == '' or isinstance(balance, bool) or not isinstance(balance, (str, int, float)):
@@ -495,27 +540,20 @@ def _extract_record_rate_limits(record: Any) -> dict[str, Any] | None:
 
 
 def _parse_timestamp(ts_str: Any) -> datetime | None:
-    """Parse a session record's ISO ``timestamp`` into a datetime, or None."""
+    """Parse a session record's ISO ``timestamp`` into a tz-aware datetime.
+
+    A timezone-naive timestamp is treated as UTC so comparisons never mix
+    aware and naive datetimes (which would raise ``TypeError``).
+    """
     if not ts_str:
         return None
     try:
-        return datetime.fromisoformat(str(ts_str).replace('Z', '+00:00'))
+        dt = datetime.fromisoformat(str(ts_str).replace('Z', '+00:00'))
     except (ValueError, TypeError):
         return None
-
-
-def _locate_rate_limits(payload: Any) -> dict[str, Any] | None:
-    """Find the ``rate_limits`` object in an API response of varying shape."""
-    if not isinstance(payload, dict):
-        return None
-    for key in ('rate_limits', 'rate_limit'):
-        value = payload.get(key)
-        if isinstance(value, dict):
-            return value
-    # The endpoint may also return the windows at the top level.
-    if 'primary' in payload or 'secondary' in payload:
-        return payload
-    return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 # ---------------------------------------------------------------------------

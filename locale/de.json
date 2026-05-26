@@ -81,5 +81,6 @@
     "credits_unlimited": "Unbegrenzt",
     "credits_remaining": "{balance} Credits übrig",
     "status_local_snapshot": "Lokaler Snapshot · Live-API nicht verfügbar",
-    "replace_failed": "Die laufende Instanz konnte nicht ersetzt werden - sie ist noch aktiv."
+    "replace_failed": "Die laufende Instanz konnte nicht ersetzt werden - sie ist noch aktiv.",
+    "status_session_mode": "Sitzungsmodus (lokale Daten)"
 }

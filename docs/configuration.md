@@ -33,6 +33,11 @@ Codex usage can come from two places. The live API gives the freshest numbers; t
 
 An unrecognized value falls back to `"auto"`. See [API Reference](api-reference.md) for the underlying data sources.
 
+> [!NOTE]
+> **Session data is display-only.** Whenever usage comes from local session files - whether you set `usage_source` to `"session"` or `"auto"` fell back to them because the live API was unavailable - the app shows the numbers but fires **no notifications and no [event commands](event-commands.md)**. Session files reflect your last Codex turn, not live spend, and they may have been written by a different machine, so acting on them automatically would be unreliable. Notifications and commands resume the moment a live API reading succeeds.
+>
+> The status line distinguishes the two cases: explicit `usage_source="session"` shows a neutral **"Session mode (local data)"**, while an `"auto"` run that failed to reach the API shows the degraded **"Local snapshot · live API unavailable"**.
+
 ## Alert thresholds
 
 Configure usage percentage thresholds that trigger Windows notifications. The primary (5-hour) and weekly (7-day) windows have separate thresholds since their time horizons differ significantly. Set to an empty array `[]` to disable alerts for a specific quota type.

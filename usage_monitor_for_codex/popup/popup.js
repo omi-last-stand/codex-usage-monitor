@@ -252,8 +252,11 @@ function updateStatus(status) {
             refreshing: status.refreshing,
             error: status.error,
             source: status.source,
+            apiError: status.api_error,
         };
-        els.statusSection.classList.toggle('error', !!status.error || status.source === 'session');
+        // A degraded fallback (session data after a live-API failure) is an error
+        // state; an explicitly chosen session mode is neutral.
+        els.statusSection.classList.toggle('error', !!status.error || (status.source === 'session' && !!status.api_error));
         tickStatusText();
         textTimerId = setInterval(tickStatusText, 1000);
     } else {
@@ -277,8 +280,10 @@ function tickStatusText() {
     // "Updated Xs ago" timer would reflect the read time, not the data's true
     // age, so it would be misleading - show a clear local/unavailable indicator.
     if (statusState.source === 'session') {
-        els.statusText.textContent = translations.status_local_snapshot;
-        els.statusSection.classList.add('error');
+        // Fallback after a live-API failure -> degraded (error styling); an
+        // explicitly configured session mode -> neutral local-data label.
+        els.statusText.textContent = statusState.apiError ? translations.status_local_snapshot : translations.status_session_mode;
+        els.statusSection.classList.toggle('error', !!statusState.apiError);
         els.blocks.classList.remove('stale');
         return;
     }

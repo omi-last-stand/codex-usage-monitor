@@ -476,6 +476,35 @@ class TestSnapshotToDict(unittest.TestCase):
         self.assertTrue(status_blocks)
         self.assertEqual(status_blocks[0]['state'], 'visible')
 
+    def test_plan_hidden_on_session_source(self):
+        """On unverified session data, a (possibly foreign) plan is not attributed to the user."""
+        profile = {'account': {'email': 'u@example.com', 'uuid': 'x'}, 'organization': {'organization_type': 'plus'}}
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'plan_type': 'team', 'source': 'session'}
+        result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
+        self.assertEqual(result['profile']['email'], 'u@example.com')
+        self.assertEqual(result['profile']['plan'], '')  # suppressed (not "Team")
+
+    def test_plan_shown_on_api_source(self):
+        """On live (api) data, the plan is shown."""
+        profile = {'account': {'email': 'u@example.com', 'uuid': 'x'}, 'organization': {'organization_type': 'plus'}}
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'plan_type': 'pro', 'source': 'api'}
+        result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
+        self.assertEqual(result['profile']['plan'], 'Pro')
+
+    def test_status_fallback_carries_api_error(self):
+        """An auto fallback (API failed) carries api_error so the UI shows the degraded label."""
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'source': 'session', 'api_error': 'expired token'}
+        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        self.assertEqual(result['status']['source'], 'session')
+        self.assertEqual(result['status']['api_error'], 'expired token')
+
+    def test_status_explicit_session_has_no_api_error(self):
+        """Explicit session mode (no API attempted) has no api_error -> neutral UI label."""
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'source': 'session'}
+        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        self.assertEqual(result['status']['source'], 'session')
+        self.assertIsNone(result['status'].get('api_error'))
+
     @patch('usage_monitor_for_codex.popup.format_credits', side_effect=lambda c: f'${c / 100:.2f}')
     def test_extra_usage_fill_clamped(self, _mock_credits):
         """Extra usage fill is clamped to 1.0 when over limit."""

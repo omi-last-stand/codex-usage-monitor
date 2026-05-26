@@ -81,5 +81,6 @@
     "credits_unlimited": "無制限",
     "credits_remaining": "残り {balance} クレジット",
     "status_local_snapshot": "ローカルのスナップショット · ライブAPI利用不可",
-    "replace_failed": "実行中のインスタンスを置き換えられませんでした（まだ動作中です）。"
+    "replace_failed": "実行中のインスタンスを置き換えられませんでした（まだ動作中です）。",
+    "status_session_mode": "セッションモード（ローカルデータ）"
 }

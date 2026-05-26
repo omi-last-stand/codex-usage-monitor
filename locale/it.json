@@ -81,5 +81,6 @@
     "credits_unlimited": "Illimitato",
     "credits_remaining": "{balance} crediti rimanenti",
     "status_local_snapshot": "Snapshot locale · API live non disponibile",
-    "replace_failed": "Impossibile sostituire l'istanza in esecuzione: è ancora attiva."
+    "replace_failed": "Impossibile sostituire l'istanza in esecuzione: è ancora attiva.",
+    "status_session_mode": "Modalità sessione (dati locali)"
 }

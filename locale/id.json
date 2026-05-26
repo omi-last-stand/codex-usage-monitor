@@ -81,5 +81,6 @@
     "credits_unlimited": "Tak terbatas",
     "credits_remaining": "Sisa {balance} kredit",
     "status_local_snapshot": "Snapshot lokal · API langsung tidak tersedia",
-    "replace_failed": "Tidak dapat mengganti instance yang berjalan - masih aktif."
+    "replace_failed": "Tidak dapat mengganti instance yang berjalan - masih aktif.",
+    "status_session_mode": "Mode sesi (data lokal)"
 }

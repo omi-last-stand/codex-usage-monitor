@@ -81,5 +81,6 @@
     "credits_unlimited": "असीमित",
     "credits_remaining": "{balance} क्रेडिट शेष",
     "status_local_snapshot": "लोकल स्नैपशॉट · लाइव API अनुपलब्ध",
-    "replace_failed": "चल रहे इंस्टेंस को बदला नहीं जा सका - यह अभी भी सक्रिय है।"
+    "replace_failed": "चल रहे इंस्टेंस को बदला नहीं जा सका - यह अभी भी सक्रिय है।",
+    "status_session_mode": "सत्र मोड (स्थानीय डेटा)"
 }

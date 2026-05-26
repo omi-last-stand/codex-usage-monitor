@@ -81,5 +81,6 @@
     "credits_unlimited": "Unlimited",
     "credits_remaining": "{balance} credits remaining",
     "status_local_snapshot": "Local snapshot · live API unavailable",
-    "replace_failed": "Could not replace the running instance - it is still active."
+    "replace_failed": "Could not replace the running instance - it is still active.",
+    "status_session_mode": "Session mode (local data)"
 }

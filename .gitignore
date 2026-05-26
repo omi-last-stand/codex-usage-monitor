@@ -35,6 +35,9 @@ codex-usage-monitor.ini
 .claude/skills/
 skills-lock.json
 
+# Internal review notes (not part of the app)
+codex/
+
 # OS
 Thumbs.db
 Desktop.ini

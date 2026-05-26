@@ -18,6 +18,9 @@ Both settings accept a single command string or an array of strings to run multi
 
 Commands only fire on **state changes** detected while the app is running. On app startup, already-exceeded thresholds trigger a desktop notification but do not run `on_threshold_command` - this prevents duplicate commands after a restart or reboot.
 
+> [!IMPORTANT]
+> Event commands fire only for **live API** data. When usage is read from local session files - either because `usage_source` is `"session"` or because `"auto"` fell back after the API was unavailable - the app updates the display only: no notifications and no `on_reset_command` / `on_threshold_command` / `on_startup_command` run. Session numbers reflect your last Codex turn (possibly from another machine), not live spend, so they are not a reliable trigger. Commands resume on the next successful live reading. See [Usage data source](configuration.md#usage-data-source).
+
 When `on_reset_command` is configured, the app briefly wakes from idle/lock pause to poll at the expected reset time so the command fires promptly - even if the computer is unattended. If the reset has not been applied yet (server-side delay) or the network is temporarily unavailable, the app retries at regular intervals until the reset is confirmed. `on_threshold_command` does not wake from idle - thresholds are driven by active usage, so they are checked when polling resumes after the user returns. Desktop notifications that occur during idle are deferred and shown when the user returns.
 
 > [!TIP]

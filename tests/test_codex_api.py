@@ -242,6 +242,38 @@ class TestFetchUsageApi(unittest.TestCase):
 
     @patch('usage_monitor_for_codex.codex_api.requests.get')
     @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
+    def test_official_http_payload_shape(self, _mock_headers, mock_get):
+        """The live wham/usage RateLimitStatusPayload is parsed correctly.
+
+        Real HTTP shape: rate_limit.primary_window/secondary_window with
+        used_percent + limit_window_seconds + reset_at, and top-level
+        credits/plan_type (NOT the session-snapshot shape).
+        """
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            'plan_type': 'pro',
+            'rate_limit': {
+                'allowed': True, 'limit_reached': False,
+                'primary_window': {'used_percent': 42, 'limit_window_seconds': 18000,
+                                   'reset_after_seconds': 3600, 'reset_at': 1779754106},
+                'secondary_window': {'used_percent': 84, 'limit_window_seconds': 604800,
+                                     'reset_after_seconds': 86400, 'reset_at': 1780192198},
+            },
+            'credits': {'has_credits': True, 'unlimited': False, 'balance': '9.99'},
+        }
+        mock_get.return_value = mock_resp
+
+        result = fetch_usage()
+        self.assertEqual(result['source'], 'api')
+        self.assertEqual(result['five_hour']['utilization'], 42.0)
+        self.assertEqual(result['five_hour']['window_minutes'], 300)    # 18000s -> 300min
+        self.assertEqual(result['seven_day']['utilization'], 84.0)
+        self.assertEqual(result['seven_day']['window_minutes'], 10080)  # 604800s -> 10080min
+        self.assertEqual(result['plan_type'], 'pro')
+        self.assertEqual(result['extra_usage'], {'is_enabled': True, 'unlimited': False, 'balance': '9.99'})
+
+    @patch('usage_monitor_for_codex.codex_api.requests.get')
+    @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
     def test_no_rate_limits_returns_no_usage_data(self, _mock_headers, mock_get):
         """A response without any rate-limit windows returns no_usage_data."""
         mock_resp = MagicMock()
@@ -660,6 +692,27 @@ class TestSessionFallback(unittest.TestCase):
         self.assertEqual(result['source'], 'session')
         self.assertIn('snapshot_at', result)
 
+    @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'session')
+    def test_mixed_timezone_timestamps_no_crash(self):
+        """A mix of 'Z' (aware) and naive timestamps must not raise TypeError."""
+        with TemporaryDirectory() as tmp:
+            sessions = Path(tmp)
+            day = sessions / '2026' / '05' / '26'
+            day.mkdir(parents=True)
+
+            def write(name, ts, used):
+                rl = {'primary': {'used_percent': used, 'window_minutes': 300, 'resets_at': 1779754106}}
+                rec = {'timestamp': ts, 'payload': {'type': 'token_count', 'info': {'rate_limits': rl}}}
+                (day / f'rollout-{name}.jsonl').write_text(json.dumps(rec) + '\n', encoding='utf-8')
+
+            write('A', '2026-05-26T10:00:00Z', 10)  # tz-aware
+            write('B', '2026-05-26T08:00:00', 90)   # naive (treated as UTC)
+            with patch('usage_monitor_for_codex.codex_api.CODEX_SESSIONS_DIR', sessions):
+                result = fetch_usage()
+
+        self.assertEqual(result['source'], 'session')
+        self.assertEqual(result['five_hour']['utilization'], 10.0)  # 10:00 newer than 08:00
+
     @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'auto')
     @patch('usage_monitor_for_codex.codex_api.requests.get', side_effect=requests.ConnectionError())
     @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -833,6 +886,10 @@ class TestCreditsTransform(unittest.TestCase):
 
     def test_float_inf_balance_no_extra(self):
         self.assertIsNone(self._extra({'has_credits': True, 'unlimited': False, 'balance': float('inf')}))
+
+    def test_has_credits_false_with_balance_no_extra(self):
+        """has_credits=false hides the row even if a (stale) balance is present."""
+        self.assertIsNone(self._extra({'has_credits': False, 'unlimited': False, 'balance': '0'}))
 
 
 if __name__ == '__main__':
