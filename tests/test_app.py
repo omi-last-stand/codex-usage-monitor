@@ -2022,8 +2022,10 @@ class TestAccountSwitchDetection(unittest.TestCase):
 
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
-    def test_account_switch_clears_prev_utilization(self, _icon, _tooltip):
-        """Account switch resets _prev_utilization to prevent false reset notifications."""
+    def test_account_switch_rebaselines_prev_utilization(self, _icon, _tooltip):
+        """Account switch drops the OLD account's high baseline and re-baselines to
+        the NEW account's own values, so reset detection cannot fire on the old
+        account's near-exhausted quota."""
         data = {'five_hour': {'utilization': 5.0}, 'seven_day': {'utilization': 5.0}}
         self.app._prev_utilization = {'five_hour': 97.0, 'seven_day': 99.0}
         self.app._prev_account_uuid = 'uuid-old'
@@ -2031,21 +2033,25 @@ class TestAccountSwitchDetection(unittest.TestCase):
 
         self.app.update()
 
-        # prev_utilization must be cleared so reset detection cannot fire on next cycle
-        self.assertEqual(self.app._prev_utilization, {})
+        # the old account's {97, 99} is gone; the baseline is the new account's values
+        self.assertEqual(self.app._prev_utilization, {'five_hour': 5.0, 'seven_day': 5.0})
 
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
-    def test_account_switch_clears_notified_thresholds(self, _icon, _tooltip):
-        """Account switch resets _notified_thresholds so threshold alerts re-arm for new account."""
-        data = {'five_hour': {'utilization': 85.0}}
+    def test_account_switch_rebaselines_notified_thresholds(self, _icon, _tooltip):
+        """Account switch drops the OLD account's notified-threshold state; the NEW
+        account's already-exceeded level becomes its own baseline (recorded, not
+        re-fired as a command), so only a genuinely higher new-account crossing fires
+        later. The new value (95) proves it is the new account's baseline, not the old
+        carried-over 80."""
+        data = {'five_hour': {'utilization': 96.0}}
         self.app._notified_thresholds = {'five_hour': 80.0}
         self.app._prev_account_uuid = 'uuid-old'
         self.app.cache = self._make_cache_mock('uuid-new', 'new@example.com', data)
 
         self.app.update()
 
-        self.assertEqual(self.app._notified_thresholds, {})
+        self.assertEqual(self.app._notified_thresholds, {'five_hour': 95.0})
 
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
@@ -2581,7 +2587,9 @@ class TestSourceSwitchGuard(unittest.TestCase):
         self.app.update()  # B@5 profile B -> uuid switch A->B resets state, NO false reset
         self.assertFalse(any(c[0][1].get('USAGE_MONITOR_EVENT') == 'reset' for c in self._cmd.call_args_list))
         self.assertEqual(self.app._prev_account_uuid, 'acct-B')
-        self.assertEqual(self.app._prev_utilization, {})  # reset on the verified switch
+        # the verified switch sample re-baselines to the NEW account's value (5),
+        # not the old account's 97, so no false reset
+        self.assertEqual(self.app._prev_utilization, {'five_hour': 5.0})
 
     def test_account_mismatch_live_sample_suppresses_events(self):
         """A live sample whose stamped account differs from the displayed profile
@@ -2767,24 +2775,71 @@ class TestSourceSwitchGuard(unittest.TestCase):
 
     @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
     @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
-    def test_verified_account_switch_does_not_carry_threshold_state(self):
-        """A verified account switch (A -> B) must not carry A's notified-threshold
-        history to B, so B's own crossing is not silently suppressed (review 1633)."""
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_account_switch_to_high_account_does_not_fire_command(self):
+        """Switching to an account that is ALREADY above a threshold is existing
+        state, not an observed crossing, so on_threshold_command must NOT fire - the
+        new account's first verified sample is a baseline (review 1745 repro 1)."""
         self.app.cache = MagicMock()
         self.app.cache.update.side_effect = [
-            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
-            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # switch
-            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # B's own crossing
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # switch sample (baseline)
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # no crossing (96->96)
         ]
         self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
-        self.app.update()  # A@96 -> notify 95, notified=95 for A
+        self.app.update()  # A@10 verified
         self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}  # codex login to B
         self.app.icon.notify.reset_mock()
         self._cmd.reset_mock()
-        self.app.update()  # B@96 -> uuid switch A->B: reset trusted state, no threshold cmd
-        self.app.update()  # B@96 -> B's own 95% crossing, NOT suppressed by A's history
-        self._cmd.assert_called_once()
-        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'threshold')
+        self.app.update()  # B@96 switch sample -> baseline (no command)
+        self.app.update()  # B@96 again -> no crossing
+        self.assertFalse(any(c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold' for c in self._cmd.call_args_list))
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_account_switch_via_mismatch_then_high_no_command(self):
+        """When the switch is detected on a mid-switch mismatch sample (profile already
+        B but the in-flight response is still A's), the first VERIFIED B sample is the
+        baseline - an already-high B does not fire on_threshold_command (review 1745
+        repro 2)."""
+        self.app.cache = MagicMock()
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # in-flight A while profile is B
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # first verified B (baseline)
+        ]
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.update()  # A@10 verified
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}  # codex login to B (profile refreshed)
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # switch detected (profile B), response A -> mismatch, returns; baseline pending
+        self.app.update()  # first verified B@96 -> baseline (no command)
+        self.assertFalse(any(c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold' for c in self._cmd.call_args_list))
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_account_switch_then_observed_crossing_fires(self):
+        """After a switch establishes the new account's baseline, a genuinely OBSERVED
+        crossing for that account (B@10 -> B@96) fires on_threshold_command exactly
+        once - the switch did not suppress B's real crossing (review 1745 repro 3)."""
+        self.app.cache = MagicMock()
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # switch sample (baseline 10)
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # observed B crossing
+        ]
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.update()  # A@10 verified
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}  # codex login to B
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # B@10 switch sample -> baseline 10 (no command)
+        self.app.update()  # B@96 -> observed crossing from B's baseline -> fires once
+        threshold_calls = [c for c in self._cmd.call_args_list if c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold']
+        self.assertEqual(len(threshold_calls), 1)
+        self.assertEqual(threshold_calls[0][0][1]['USAGE_MONITOR_THRESHOLD'], '95')
 
     def test_flapping_fires_verified_crossing_once_not_spam(self):
         """Source flapping is neither silent nor spammy: intervening session samples

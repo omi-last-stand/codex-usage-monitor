@@ -61,6 +61,13 @@ class UsageMonitorForCodex:
         self._prev_source: str | None = None
         self._first_update_done = False
         self._notified_thresholds: dict[str, float] = {}
+        # After a verified account switch, the first verified sample of the NEW
+        # account is a fresh baseline, not an OBSERVED crossing - so suppress
+        # on_threshold_command for it (exactly as at app startup): merely switching
+        # to an already-high account must not fire the command. Cleared once that
+        # first verified sample establishes the baseline; a later observed crossing
+        # (B@low -> B@high) then fires normally.
+        self._threshold_baseline_pending = False
 
         # Adaptive polling state
         self._fast_polls_remaining = 0
@@ -291,13 +298,17 @@ class UsageMonitorForCodex:
             return
 
         # Detect an account switch by comparing the profile UUID across polls. The
-        # profile cache is keyed on (access_token, account_id), so ensure_profile()
-        # re-fetches when EITHER the access token changes (a `codex login`) OR the
-        # ChatGPT-Account-Id changes (a same-token workspace/account switch) - either
-        # yields a new account UUID here. On a switch, reset the trusted event state
-        # so the new account's usage is never compared against, or suppressed by, the
-        # old account's (which would otherwise fire a false reset or swallow a real
-        # crossing). No events fire on the switch sample itself.
+        # profile cache is keyed on (access_token, effective account id), so
+        # ensure_profile() re-fetches when EITHER the access token changes (a `codex
+        # login`) OR the account changes (a same-token workspace/account switch) -
+        # either yields a new account UUID here. On a switch, reset the OLD account's
+        # trusted event state and mark the next verified sample a fresh BASELINE (no
+        # threshold command): merely switching to an already-high account is existing
+        # state, not an OBSERVED crossing. Do NOT return - the switch sample itself,
+        # if it is verified for the new account, establishes that account's baseline
+        # below (so a later observed B-low -> B-high crossing still fires); a
+        # mid-switch mismatch / unverified sample instead returns at the identity
+        # gate, leaving the baseline to the first following verified sample.
         self.cache.ensure_profile()
         current_profile = self.cache.profile
         current_account_uuid = current_profile.get('account', {}).get('uuid') if isinstance(current_profile, dict) else None
@@ -307,8 +318,7 @@ class UsageMonitorForCodex:
             self._notify_or_defer('account_switched', message, T['notify_account_switched_title'])
             self._prev_utilization = {}
             self._notified_thresholds = {}
-            self._prev_account_uuid = current_account_uuid
-            return
+            self._threshold_baseline_pending = True
         # Preserve the last known account UUID across a transient profile-fetch
         # failure (current_account_uuid is None). Overwriting it with None here would
         # lose the prior identity, so a genuine switch A -> B whose first B-profile
@@ -357,6 +367,10 @@ class UsageMonitorForCodex:
                 self._idle_reset_pending = False
 
         self._check_threshold_alerts(result.data)
+        # This verified sample has now established the post-switch baseline (its
+        # notified-threshold levels are recorded above without firing a command);
+        # subsequent samples may fire on a genuinely observed crossing.
+        self._threshold_baseline_pending = False
 
         # Adaptive polling: speed up when the primary quota's usage is increasing
         watch_key = TOOLTIP_FIELDS[0] if TOOLTIP_FIELDS else 'five_hour'
@@ -573,12 +587,14 @@ class UsageMonitorForCodex:
     ) -> None:
         """Run the user-configured threshold command if set.
 
-        Skipped on the first update (before ``_first_update_done`` is set)
-        so that already-exceeded thresholds at app startup do not trigger
-        commands.  Notifications still fire - commands react to *events*,
-        not *state*.
+        Skipped on the first update (before ``_first_update_done`` is set) and on
+        the first verified sample after an account switch
+        (``_threshold_baseline_pending``) so that already-exceeded thresholds at app
+        startup OR at a freshly-switched-to account do not trigger commands - those
+        are existing *state*, not an OBSERVED crossing.  Notifications still fire -
+        commands react to *events*, not *state*.
         """
-        if not ON_THRESHOLD_COMMAND or not self._first_update_done:
+        if not ON_THRESHOLD_COMMAND or not self._first_update_done or self._threshold_baseline_pending:
             return
 
         env_vars = {
