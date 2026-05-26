@@ -459,6 +459,92 @@ class TestExtraUsageAlerts(unittest.TestCase):
         self.app.icon.notify.assert_called_once()
 
 
+class TestExtraUsageBaselineGuard(unittest.TestCase):
+    """The extra_usage threshold COMMAND fires only on an OBSERVED crossing for the
+    current account, mirroring the per-window guard for the sliding-window quotas
+    (review 2017 参考確認 / legacy extra_usage branch). Notifications, which react to
+    state, still fire on a first observation; only on_threshold_command is gated."""
+
+    def setUp(self):
+        self.app = _make_app(thresholds=[80, 95])
+        self.app._first_update_done = True
+        self._cmd_patch = patch('usage_monitor_for_codex.app.run_event_command')
+        self._cmd = self._cmd_patch.start()
+        self._on_patch = patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+        self._on_patch.start()
+
+    def tearDown(self):
+        self._on_patch.stop()
+        self._cmd_patch.stop()
+        _cleanup(self.app)
+
+    def _extra(self, used, limit=1000):
+        return {'extra_usage': {'is_enabled': True, 'monthly_limit': limit, 'used_credits': used}}
+
+    def _fired(self):
+        return [
+            c for c in self._cmd.call_args_list
+            if c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold'
+            and c[0][1].get('USAGE_MONITOR_VARIANT') == 'extra_usage'
+        ]
+
+    def test_first_observation_high_does_not_fire_command(self):
+        """extra_usage first appearing already high (no prior observation for this
+        account) seeds the baseline and notifies, but must NOT fire the command."""
+        self.app._check_threshold_alerts(self._extra(used=960))  # 96%, first observation
+
+        self.assertEqual(self._fired(), [])
+        self.app.icon.notify.assert_called_once()  # notification (state) still fires
+        self.assertIsNotNone(self.app._prev_extra_usage_pct)  # baseline now seeded
+
+    def test_observed_crossing_fires_command_once(self):
+        """A low observation then a high one is an OBSERVED crossing for the same
+        account -> the command fires exactly once."""
+        self.app._check_threshold_alerts(self._extra(used=100))  # 10% baseline
+        self.app._check_threshold_alerts(self._extra(used=960))  # 96% crossing
+
+        self.assertEqual(len(self._fired()), 1)
+
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_post_account_switch_first_high_does_not_fire_command(self, _icon, _tooltip):
+        """After a verified account switch, B's already-high extra_usage first
+        observation must not fire: the switch resets _prev_extra_usage_pct, so B
+        has no observed prior value (review 2017 - the same class as the quota
+        windows, closed for extra_usage too)."""
+        self.app._prev_account_uuid = 'uuid-A'
+        self.app._prev_extra_usage_pct = 10.0  # A's prior observation
+        b_data = {'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 960}}
+        cache = MagicMock()
+        cache.update.return_value = UpdateResult(data=b_data)
+        cache.profile = {'account': {'uuid': 'uuid-B', 'email': 'b@example.com'}}
+        self.app.cache = cache
+
+        self.app.update()
+
+        self.assertEqual(self._fired(), [])
+        self.assertEqual(self.app._prev_extra_usage_pct, 96.0)  # reset on switch, then re-seeded to B's
+
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_post_account_switch_observed_crossing_fires_command(self, _icon, _tooltip):
+        """After a switch, once B's extra_usage has a verified prior value, a genuine
+        B-low -> B-high crossing fires the command exactly once."""
+        self.app._prev_account_uuid = 'uuid-A'
+        self.app._prev_extra_usage_pct = 10.0
+        low = {'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 100}}
+        high = {'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 960}}
+        cache = MagicMock()
+        cache.update.side_effect = [UpdateResult(data=low), UpdateResult(data=high)]
+        cache.profile = {'account': {'uuid': 'uuid-B', 'email': 'b@example.com'}}
+        self.app.cache = cache
+
+        self.app.update()  # B switch + first observation (10%, seeds baseline)
+        self.app.update()  # B 96% -> observed crossing -> fires
+
+        self.assertEqual(len(self._fired()), 1)
+
+
 # ---------------------------------------------------------------------------
 # update() orchestration
 # ---------------------------------------------------------------------------
@@ -988,7 +1074,7 @@ class TestSecondsUntilNextReset(unittest.TestCase):
 
     def test_no_resets_at_returns_none(self):
         """Entry without resets_at returns None."""
-        self.app._last_response = {'five_hour': {'utilization': 50.0}}
+        self.app._prev_entries = {'five_hour': {'utilization': 50.0}}
         self.assertIsNone(self.app._seconds_until_next_reset())
 
     @patch('usage_monitor_for_codex.app.datetime')
@@ -998,7 +1084,7 @@ class TestSecondsUntilNextReset(unittest.TestCase):
         mock_dt.now.return_value = now
         mock_dt.fromisoformat = datetime.fromisoformat
 
-        self.app._last_response = {
+        self.app._prev_entries = {
             'five_hour': {'utilization': 50.0, 'resets_at': '2025-01-15T12:30:00+00:00'},
             'seven_day': {'utilization': 30.0, 'resets_at': '2025-01-15T14:00:00+00:00'},
         }
@@ -1014,7 +1100,7 @@ class TestSecondsUntilNextReset(unittest.TestCase):
         mock_dt.now.return_value = now
         mock_dt.fromisoformat = datetime.fromisoformat
 
-        self.app._last_response = {
+        self.app._prev_entries = {
             'five_hour': {'utilization': 50.0, 'resets_at': '2025-01-15T11:00:00+00:00'},
         }
 
@@ -1614,11 +1700,15 @@ class TestExtraUsageCommand(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
     @patch('usage_monitor_for_codex.app.run_event_command')
     def test_extra_usage_command_includes_amounts(self, mock_cmd):
-        """Extra usage threshold command includes used and limit amounts."""
-        data = {
-            'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 850},
-        }
-        self.app._check_threshold_alerts(data)
+        """Extra usage threshold command includes used and limit amounts.
+
+        A prior verified observation establishes the per-account baseline, so the
+        later high reading is an OBSERVED crossing (a bare first observation only
+        seeds the baseline and does not fire - see TestExtraUsageBaselineGuard)."""
+        low = {'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 100}}
+        high = {'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 850}}
+        self.app._check_threshold_alerts(low)   # baseline observation (below threshold)
+        self.app._check_threshold_alerts(high)  # observed crossing -> command fires
 
         mock_cmd.assert_called_once()
         env = mock_cmd.call_args[0][1]
@@ -2188,6 +2278,119 @@ class TestAccountSwitchDetection(unittest.TestCase):
         self.app.update()
 
         self.assertEqual(self.app._prev_account_uuid, 'uuid-new')
+
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_account_switch_clears_idle_reset_pending(self, _icon, _tooltip):
+        """A pending reset belongs to the OLD account; switching to a new account
+        (here a Credits-only payload with no quota window and so no due reset) must
+        clear _idle_reset_pending, or the idle/lock poll pause would keep waking to
+        poll an account that has nothing to confirm (review 2017 P3)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': '2099-01-01T00:00:00+00:00'}}
+        self.app._prev_account_uuid = 'uuid-old'
+        data = {'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}}
+        self.app.cache = self._make_cache_mock('uuid-new', 'new@example.com', data)
+
+        self.app.update()
+
+        self.assertFalse(self.app._idle_reset_pending)
+        # B (Credits-only) has no quota deadline at all, so nothing schedules a wake.
+        self.assertIsNone(self.app._seconds_until_next_reset())
+
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_account_switch_to_account_with_deadline_uses_new_deadline(self, _icon, _tooltip):
+        """After clearing the OLD account's pending reset, the NEW account's OWN
+        future deadline drives idle-wake scheduling normally and the old window's
+        retained deadline does not linger (review 2017 P3, test #2)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_account_uuid = 'uuid-old'
+        # OLD account had a seven_day deadline retained in the entry view.
+        self.app._prev_utilization = {'seven_day': 97.0}
+        self.app._prev_entries = {'seven_day': {'utilization': 97.0, 'resets_at': '2098-01-01T00:00:00+00:00'}}
+        # NEW account B reports only five_hour, with its own future deadline.
+        data = {'five_hour': {'utilization': 20.0, 'resets_at': '2099-01-01T00:00:00+00:00'}}
+        self.app.cache = self._make_cache_mock('uuid-new', 'new@example.com', data)
+
+        self.app.update()
+
+        self.assertFalse(self.app._idle_reset_pending)            # stale pending cleared
+        self.assertNotIn('seven_day', self.app._prev_entries)     # old window dropped
+        self.assertEqual(set(self.app._prev_entries), {'five_hour'})  # only B's window remains
+        secs = self.app._seconds_until_next_reset()
+        self.assertIsNotNone(secs)
+        self.assertGreater(secs, 3600)                            # B's own deadline drives scheduling
+
+    @patch('usage_monitor_for_codex.app.is_workstation_locked', return_value=True)
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_account_switch_drops_old_deferred_notifications(self, _icon, _tooltip, _locked):
+        """While the user is away, account A may have deferred a reset/threshold
+        notification; switching to B must drop those so they are not flushed (and
+        misattributed) against B on return. The fresh account-switch notice itself
+        is still queued (independent audit, same cross-account leak class)."""
+        self.app._prev_account_uuid = 'uuid-old'
+        self.app._deferred_notifications = {
+            'reset': ('A quota reset', 'Reset'),
+            'threshold_five_hour': ('A at 80%', 'Threshold'),
+        }
+        data = {'five_hour': {'utilization': 10.0}}
+        self.app.cache = self._make_cache_mock('uuid-new', 'new@example.com', data)
+
+        self.app.update()
+
+        self.assertNotIn('reset', self.app._deferred_notifications)
+        self.assertNotIn('threshold_five_hour', self.app._deferred_notifications)
+        self.assertIn('account_switched', self.app._deferred_notifications)
+
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_account_switch_clears_fast_poll_burst(self, _icon, _tooltip):
+        """The adaptive fast-poll burst is derived from the OLD account's observed
+        quota increase; switching to a new account (here Credits-only, no rising
+        quota) must reset it, or A's accelerated cadence leaks into B's polling
+        (account-derived polling state must not cross a switch - review 2017 Codex
+        re-review)."""
+        self.app._fast_polls_remaining = 5  # A's active burst
+        self.app._prev_account_uuid = 'uuid-old'
+        data = {'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}}
+        self.app.cache = self._make_cache_mock('uuid-new', 'new@example.com', data)
+
+        self.app.update()
+
+        self.assertEqual(self.app._fast_polls_remaining, 0)
+
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_mismatched_inflight_response_does_not_reseed_reset_schedule(self, _icon, _tooltip):
+        """An identity-rejected in-flight A response (account_id A) seen just after the
+        profile refreshed to B must not leave A's reset deadline visible to scheduling.
+        _seconds_until_next_reset reads only trusted retained entries (_prev_entries),
+        which the switch cleared and the rejected sample does not write - so A's stale
+        deadline, still in the display-only _last_response, cannot re-seed B's idle
+        on_reset_command polling (review 2017 Codex re-review)."""
+        self.app._prev_account_uuid = 'uuid-A'
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': '2099-01-01T00:00:00+00:00'}}
+        self.app._prev_utilization = {'five_hour': 97.0}
+        # In-flight response still stamped for A, but the profile already refreshed to
+        # B -> identity mismatch (the narrow TOCTOU between cache.update and the
+        # profile refresh within one update()).
+        inflight_a = {
+            'five_hour': {'utilization': 97.0, 'resets_at': '2099-01-01T00:00:00+00:00'},
+            'source': 'api', 'account_id': 'uuid-A',
+        }
+        mock = MagicMock()
+        mock.update.return_value = UpdateResult(data=inflight_a)
+        mock.profile = {'account': {'uuid': 'uuid-B', 'email': 'b@example.com'}}
+        self.app.cache = mock
+
+        self.app.update()
+
+        self.assertEqual(self.app._prev_entries, {})            # switch cleared; rejected sample wrote nothing
+        self.assertIn('five_hour', self.app._last_response)     # A's data remains in display-only state
+        self.assertIsNone(self.app._seconds_until_next_reset())  # but scheduling ignores it
 
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')

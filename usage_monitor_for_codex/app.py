@@ -69,9 +69,19 @@ class UsageMonitorForCodex:
         # erase that window's known reset deadline (which the idle/lock
         # on_reset_command wake-up depends on).
         self._prev_entries: dict[str, dict[str, Any]] = {}
+        # Last verified extra_usage (Credits) utilization for the current account,
+        # the extra_usage counterpart to _prev_utilization (reset on a verified
+        # account switch). Gates the extra_usage threshold command to an OBSERVED
+        # crossing: None means "not yet observed for this account", so a first
+        # observation seeds the baseline without firing on_threshold_command.
+        self._prev_extra_usage_pct: float | None = None
 
         # Adaptive polling state
         self._fast_polls_remaining = 0
+        # Per-account: an awaited reset deadline for the CURRENT account is pending
+        # confirmation. Reset on a verified account switch (the new account has its
+        # own deadlines), else a stale pending flag would keep polling a switched-to
+        # account that has no due reset while the user is idle/locked.
         self._idle_reset_pending = False
         self._deferred_notifications: dict[str, tuple[str, str]] = {}
 
@@ -315,12 +325,32 @@ class UsageMonitorForCodex:
         current_profile = self.cache.profile
         current_account_uuid = current_profile.get('account', {}).get('uuid') if isinstance(current_profile, dict) else None
         if self._prev_account_uuid is not None and current_account_uuid is not None and current_account_uuid != self._prev_account_uuid:
+            # Drop the OLD account's deferred notifications BEFORE enqueueing the
+            # switch notice below: while the user was away, a reset/threshold
+            # notification may have been deferred for account A; flushing it on
+            # return would surface a stale, misattributed alert against the now-
+            # displayed account B (the same cross-account leak this block prevents).
+            self._deferred_notifications.clear()
             email = current_profile.get('account', {}).get('email', '')
             message = T['notify_account_switched'].format(email=email) if email else T['notify_account_switched_title']
             self._notify_or_defer('account_switched', message, T['notify_account_switched_title'])
+            # Clear ALL account-scoped trusted state so no old-account value leaks
+            # into the new account's events, display, or idle polling. _prev_account_uuid
+            # is advanced (not cleared) below; global/lifecycle state persists.
             self._prev_utilization = {}
             self._prev_entries = {}
             self._notified_thresholds = {}
+            self._prev_extra_usage_pct = None
+            # A pending reset belongs to the OLD account; the new account has its own
+            # deadlines. Leaving this set would keep idle/locked polling alive for a
+            # switched-to account that has no due reset (unnecessary background wakes).
+            self._idle_reset_pending = False
+            # The fast-poll burst is derived from the OLD account's observed quota
+            # increase; the new account hasn't shown a rise yet. Leaving it would
+            # carry A's accelerated cadence into B for a couple of polls - account-
+            # derived polling state must not cross a switch. B re-arms its own burst
+            # the moment its usage is seen to increase.
+            self._fast_polls_remaining = 0
         # Preserve the last known account UUID across a transient profile-fetch
         # failure (current_account_uuid is None). Overwriting it with None here would
         # lose the prior identity, so a genuine switch A -> B whose first B-profile
@@ -533,6 +563,18 @@ class UsageMonitorForCodex:
         exceeded = [t for t in thresholds if pct >= t]
         highest_exceeded = max(exceeded) if exceeded else 0
         last_notified = self._notified_thresholds.get('extra_usage', 0)
+        # Per-account baseline guard, the extra_usage counterpart to the per-window
+        # guard for the sliding-window quotas in _check_threshold_alerts: fire the
+        # command only on an OBSERVED crossing - extra_usage must have a verified
+        # prior value for the current account (reset on an account switch). A first
+        # observation - app startup, the first sample after an account switch, or
+        # extra_usage first appearing mid-session - is existing state, not a
+        # crossing: it seeds the baseline and shows a notification, but must not
+        # fire on_threshold_command. (The live Codex path emits credits as
+        # balance/unlimited, not the monthly_limit/used_credits shape this branch
+        # consumes, so this hardens the legacy/compat shape rather than a currently
+        # reachable payload - kept consistent with the quota path regardless.)
+        observed_before = self._prev_extra_usage_pct is not None
 
         if highest_exceeded > last_notified:
             title = T['notify_threshold_title']
@@ -540,13 +582,18 @@ class UsageMonitorForCodex:
                 pct=f'{pct:.0f}', used=format_credits(used), limit=format_credits(limit),
             )
             self._notify_or_defer('threshold_extra_usage', message, title)
-            self._run_threshold_command(
-                'extra_usage', pct, highest_exceeded, extra, title, message,
-                extra_used=format_credits(used), extra_limit=format_credits(limit),
-            )
+            if observed_before:
+                self._run_threshold_command(
+                    'extra_usage', pct, highest_exceeded, extra, title, message,
+                    extra_used=format_credits(used), extra_limit=format_credits(limit),
+                )
             self._notified_thresholds['extra_usage'] = highest_exceeded
         elif highest_exceeded < last_notified:
             self._notified_thresholds['extra_usage'] = highest_exceeded
+
+        # Record this verified observation so a later crossing for the SAME account
+        # is recognised as observed (reset to None on an account switch).
+        self._prev_extra_usage_pct = pct
 
     # Event commands
 
@@ -654,19 +701,20 @@ class UsageMonitorForCodex:
     def _seconds_until_next_reset(self) -> float | None:
         """Return seconds until the earliest upcoming quota reset, or None.
 
-        Reads the BEST-KNOWN per-window view - the retained verified entries
-        (_prev_entries, which survive a partial / credits-only response that omits a
-        window) overlaid on the latest raw response - rather than the latest raw
-        response alone. A verified sample writes both, so they agree; for a partial,
-        credits-only, session, or error response the retained verified deadline is
-        preserved (and a trusted entry wins over any same-window value in the raw
-        response), so an upcoming reset that the idle/lock on_reset_command wake-up
-        depends on is never discarded just because one response omitted that window.
+        Reads ONLY the trusted retained entries (_prev_entries): they hold every
+        verified window's deadline for the CURRENTLY displayed account, merged across
+        partial / credits-only responses that omit a window and cleared on a verified
+        account switch. The raw _last_response is NOT consulted: it is display state
+        written for EVERY sample (line ~273) BEFORE the identity gate, so it can carry
+        an identity-rejected cross-account sample's deadline (e.g. an in-flight A
+        response seen just after the profile refreshed to B). Trusting it here would
+        let that stale A deadline re-seed B's idle on_reset_command polling. A verified
+        sample writes both _prev_entries and _last_response, so reading the trusted
+        view alone loses no legitimate deadline while staying fail-closed.
         """
         now = datetime.now(timezone.utc)
         earliest = None
-        windows = {**self._last_response, **self._prev_entries}
-        for key, entry in windows.items():
+        for key, entry in self._prev_entries.items():
             if not isinstance(entry, dict) or not entry.get('resets_at'):
                 continue
             try:
