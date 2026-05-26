@@ -1718,6 +1718,252 @@ class TestExpiredWindowReset(unittest.TestCase):
         self.assertEqual(len(self._reset_calls('seven_day')), 1)
         self.assertNotIn('seven_day', self.app._prev_utilization)
 
+    def test_low_usage_expiry_clears_idle_reset_pending(self):
+        """A confirmed period end COMPLETES the idle reset-deadline wait even when no
+        reset command fires (low usage). _idle_reset_pending must clear, or the
+        idle/lock pause would keep polling every POLL_INTERVAL with nothing left to
+        confirm (review 2146)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'five_hour': 10.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 10.0, 'resets_at': self.PAST}}
+
+        self._feed({'plan_type': 'pro', 'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}})
+
+        self.assertNotIn('five_hour', self.app._prev_utilization)   # period retired
+        self.assertEqual(self._reset_calls('five_hour'), [])        # low usage -> no reset command
+        self.assertFalse(self.app._idle_reset_pending)              # wait completed
+        self.assertIsNone(self.app._seconds_until_next_reset())     # nothing left to wake for
+
+    def test_low_usage_expiry_to_new_deadline_clears_pending_keeps_new_wake(self):
+        """A low-usage window that rolls straight into a new period clears the old
+        pending wait, while the NEW deadline is retained to re-schedule the next idle
+        wake normally (review 2146)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'five_hour': 10.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 10.0, 'resets_at': self.PAST}}
+
+        self._feed({'five_hour': {'utilization': 20.0, 'resets_at': self.FUTURE}})
+
+        self.assertFalse(self.app._idle_reset_pending)                                   # old wait cleared
+        self.assertEqual(self.app._prev_entries['five_hour']['resets_at'], self.FUTURE)  # new deadline retained
+        secs = self.app._seconds_until_next_reset()
+        self.assertIsNotNone(secs)
+        self.assertGreater(secs, 3600)                                                   # new deadline drives the next wake
+
+    def test_unadvanced_expired_deadline_keeps_pending(self):
+        """If the server still reports a near-exhausted window with the SAME already-
+        passed deadline (period not yet advanced, drop not yet observed), the reset
+        confirmation is NOT complete: keep _idle_reset_pending and keep retrying
+        (review 2146 caveat)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.PAST}}
+
+        self._feed({'five_hour': {'utilization': 97.0, 'resets_at': self.PAST}})
+
+        self.assertIn('five_hour', self.app._prev_utilization)  # lingering value kept
+        self.assertTrue(self.app._idle_reset_pending)           # still waiting to confirm
+
+    def test_low_usage_same_passed_deadline_clears_pending(self):
+        """A LOW-usage window lingering under the SAME now-passed deadline has no reset
+        command pending for it, so the idle retry must end even though nothing fired or
+        rolled over this pass - the overdue deadline was evaluated and found not awaiting
+        (review 2146 Codex re-review #6)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'five_hour': 10.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 10.0, 'resets_at': self.PAST}}
+
+        self._feed({'five_hour': {'utilization': 10.0, 'resets_at': self.PAST}})
+
+        self.assertIn('five_hour', self.app._prev_utilization)  # kept (lingering, not a rollover)
+        self.assertFalse(self.app._idle_reset_pending)          # no pending reset -> retry ends
+
+    def test_unparseable_overdue_window_does_not_keep_pending(self):
+        """A fallback/unparseable quota window (e.g. 'primary', which Phase 1 cannot
+        fire on_reset_command for) must not be counted as awaiting an impossible reset,
+        so it does not hold the idle retry open forever (review 2146 Codex re-review
+        #7)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'primary': 99.0}
+        self.app._prev_entries = {'primary': {'utilization': 99.0, 'resets_at': self.PAST}}
+
+        self._feed({'primary': {'utilization': 99.0, 'resets_at': self.PAST}})
+
+        self.assertFalse(self.app._idle_reset_pending)  # not reset-eligible -> not awaiting
+
+    def test_predeadline_dip_does_not_confirm_future_deadline(self):
+        """A reset that fires for an in-period dip while the deadline is still FUTURE
+        must NOT record that future deadline as confirmed: otherwise, when the deadline
+        later passes and the window is exhausted again under it, the genuine overdue
+        reset would be wrongly treated as already confirmed and the idle retry lost
+        (review 2146 Codex re-review #8)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.FUTURE}}
+
+        # In-period dip 97 -> 96 under the same still-FUTURE deadline fires a reset...
+        self._feed({'five_hour': {'utilization': 96.0, 'resets_at': self.FUTURE}})
+
+        self.assertEqual(len(self._reset_calls('five_hour')), 1)   # dip fired a reset
+        self.assertNotIn('five_hour', self.app._reset_confirmed)   # future deadline NOT recorded confirmed
+
+    def test_blocked_observed_drop_confirms_and_does_not_keep_pending(self):
+        """A near-exhausted window whose OVERDUE drop is observed (97 -> 96) but whose
+        reset command is suppressed by a blocking sibling is still confirmed by the
+        observation: it must not keep the idle retry alive after the blocker clears,
+        since the suppressed command is not replayed (review 2146 Codex re-review #9)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'five_hour': 97.0, 'seven_day': 99.0}
+        self.app._prev_entries = {
+            'five_hour': {'utilization': 97.0, 'resets_at': self.PAST},
+            'seven_day': {'utilization': 99.0, 'resets_at': self.FUTURE},
+        }
+        # five_hour drops 97 -> 96 (overdue, observed) but seven_day@99 blocks its command.
+        self._feed({
+            'five_hour': {'utilization': 96.0, 'resets_at': self.PAST},
+            'seven_day': {'utilization': 99.0, 'resets_at': self.FUTURE},
+        })
+        self.assertEqual(self._reset_calls('five_hour'), [])             # command suppressed by blocker
+        self.assertEqual(self.app._reset_confirmed.get('five_hour'), self.PAST)  # but observed drop is confirmed
+
+        # Later: seven_day no longer blocking; five_hour still 96 under the same passed
+        # deadline -> already confirmed, not awaiting -> idle retry ends.
+        self.app._idle_reset_pending = True
+        self._cmd.reset_mock()
+        self._feed({
+            'five_hour': {'utilization': 96.0, 'resets_at': self.PAST},
+            'seven_day': {'utilization': 50.0, 'resets_at': self.FUTURE},
+        })
+        self.assertFalse(self.app._idle_reset_pending)
+
+    def test_identity_mismatch_keeps_pending(self):
+        """An identity-rejected live sample returns before Phase 4 and must not clear
+        a pending idle reset wait (do not act on an unverified sample) (review 2146
+        caveat)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_account_uuid = 'acct-A'
+        self.app._prev_utilization = {'five_hour': 10.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 10.0, 'resets_at': self.PAST}}
+        cache = MagicMock()
+        cache.update.return_value = UpdateResult(data={
+            'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250},
+            'source': 'api', 'account_id': 'acct-B',  # stamped B, profile is A -> mismatch
+        })
+        cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache = cache
+        with patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip'), \
+             patch('usage_monitor_for_codex.app.load_tray_icon'):
+            self.app.update()
+
+        self.assertTrue(self.app._idle_reset_pending)            # unverified -> untouched
+        self.assertIn('five_hour', self.app._prev_utilization)   # trusted state untouched
+
+    def test_mixed_retire_and_unadvanced_keeps_pending(self):
+        """When one expired window is confirmed ended (retired) but ANOTHER expired
+        window is still reported with the SAME unadvanced past deadline, the idle wait
+        is NOT complete: keep _idle_reset_pending so the sibling's overdue (past-
+        deadline) confirmation keeps retrying rather than dropping into an indefinite
+        idle pause (review 2146 Codex re-review)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'seven_day': 10.0, 'five_hour': 97.0}
+        self.app._prev_entries = {
+            'seven_day': {'utilization': 10.0, 'resets_at': self.PAST},
+            'five_hour': {'utilization': 97.0, 'resets_at': self.PAST},
+        }
+        # seven_day vanishes (confirmed ended); near-exhausted five_hour still reported
+        # with the same already-passed deadline (server has not advanced its period yet).
+        self._feed({'five_hour': {'utilization': 97.0, 'resets_at': self.PAST}})
+
+        self.assertNotIn('seven_day', self.app._prev_utilization)  # confirmed-ended, retired
+        self.assertIn('five_hour', self.app._prev_utilization)     # unadvanced, kept
+        self.assertTrue(self.app._idle_reset_pending)              # still awaiting five_hour
+
+    def test_firing_reset_with_unadvanced_sibling_keeps_pending(self):
+        """Even when an expired window FIRES its reset command, a sibling still reported
+        with an unadvanced past deadline keeps _idle_reset_pending set, so its overdue
+        confirmation keeps retrying. The reset-fire clear must yield to an outstanding
+        expired-window confirmation (review 2146 Codex re-review #2)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'seven_day': 99.0, 'five_hour': 97.0}
+        self.app._prev_entries = {
+            'seven_day': {'utilization': 99.0, 'resets_at': self.PAST},
+            'five_hour': {'utilization': 97.0, 'resets_at': self.PAST},
+        }
+        # seven_day vanishes (near-exhausted -> reset FIRES; the present five_hour@97 is
+        # < 99 so it does not block); five_hour still reported, near-exhausted (> its 95
+        # reset threshold), with the same unadvanced past deadline.
+        self._feed({'five_hour': {'utilization': 97.0, 'resets_at': self.PAST}})
+
+        self.assertEqual(len(self._reset_calls('seven_day')), 1)   # reset DID fire
+        self.assertNotIn('seven_day', self.app._prev_utilization)  # retired
+        self.assertIn('five_hour', self.app._prev_utilization)     # unadvanced, kept
+        self.assertTrue(self.app._idle_reset_pending)              # kept despite the fire
+
+    def test_firing_reset_with_own_unadvanced_deadline_clears_pending(self):
+        """A window whose reset FIRES (a confirmed drop) but whose response still
+        carries the same passed deadline must NOT count as awaiting its OWN reset -
+        the fire already confirmed it. With no other overdue window, pending clears
+        (review 2146 Codex re-review #3 - do not regress command-confirmation clearing)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.PAST}}
+        # Drop confirmed (97 -> 5) but the response still reports the same passed deadline.
+        self._feed({'five_hour': {'utilization': 5.0, 'resets_at': self.PAST}})
+
+        self.assertEqual(len(self._reset_calls('five_hour')), 1)   # reset fired (confirmed drop)
+        self.assertFalse(self.app._idle_reset_pending)             # confirmed -> cleared
+
+    def test_lingering_low_fired_window_does_not_block_later_clear(self):
+        """A window that fired its reset and now lingers at a LOW value with a stale
+        passed deadline must NOT be re-counted as awaiting on a LATER pass and block
+        clearing pending when ANOTHER window's reset is confirmed (review 2146 Codex
+        re-review #4 - confirmation must persist across polls, not just the firing
+        pass)."""
+        # Pass 1: seven_day@99 -> 5 (fires; the present five_hour@97 is < 99 so it does
+        # not block), five_hour@97 near-exhausted with a passed deadline (awaiting).
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'seven_day': 99.0, 'five_hour': 97.0}
+        self.app._prev_entries = {
+            'seven_day': {'utilization': 99.0, 'resets_at': self.PAST},
+            'five_hour': {'utilization': 97.0, 'resets_at': self.PAST},
+        }
+        self._feed({
+            'seven_day': {'utilization': 5.0, 'resets_at': self.PAST},
+            'five_hour': {'utilization': 97.0, 'resets_at': self.PAST},
+        })
+        self.assertTrue(self.app._idle_reset_pending)   # five_hour still awaiting -> kept
+
+        self._cmd.reset_mock()
+        # Pass 2: five_hour's window ends (vanishes, confirmed); seven_day still lingering
+        # @5 with the same stale passed deadline. seven_day is LOW (not awaiting), so
+        # five_hour's confirmation now clears pending - the stale low seven_day (which
+        # fired LAST pass) must not be re-counted as awaiting and block the clear.
+        self._feed({'seven_day': {'utilization': 5.0, 'resets_at': self.PAST}})
+        self.assertFalse(self.app._idle_reset_pending)
+
+    def test_confirmed_above_threshold_window_does_not_block_later_clear(self):
+        """A window whose reset already fired but lingers ABOVE its threshold under the
+        same stale passed deadline (e.g. 97 -> 96, never advanced) must not be
+        re-counted as awaiting on a later pass: its reset is durably recorded as
+        confirmed for that deadline (review 2146 Codex re-review #5)."""
+        # Pass 1: five_hour 97 -> 96 under the same passed deadline -> reset fires and
+        # is recorded confirmed for that deadline.
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.PAST}}
+        self._feed({'five_hour': {'utilization': 96.0, 'resets_at': self.PAST}})
+        self.assertEqual(len(self._reset_calls('five_hour')), 1)
+
+        # Pass 2: a fresh idle wake finds five_hour still at 96 under the same passed
+        # deadline while seven_day's reset is confirmed by vanishing.
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization['seven_day'] = 99.0
+        self.app._prev_entries['seven_day'] = {'utilization': 99.0, 'resets_at': self.PAST}
+        self._cmd.reset_mock()
+        self._feed({'five_hour': {'utilization': 96.0, 'resets_at': self.PAST}})
+        # five_hour@96 is already-confirmed for this deadline (not awaiting); seven_day
+        # vanished (confirmed ended) -> pending clears, not blocked by the lingering 96.
+        self.assertFalse(self.app._idle_reset_pending)
+
 
 class TestPeriodRolloverThresholdGuard(unittest.TestCase):
     """When a quota window's PERIOD ends (its retained deadline passes), the old-period

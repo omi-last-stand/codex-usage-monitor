@@ -75,6 +75,12 @@ class UsageMonitorForCodex:
         # crossing: None means "not yet observed for this account", so a first
         # observation seeds the baseline without firing on_threshold_command.
         self._prev_extra_usage_pct: float | None = None
+        # Per window: the reset deadline (resets_at) whose reset has already been
+        # CONFIRMED for the current account (a reset command fired for it). Durable
+        # across polls so a window that already reset but lingers under the SAME stale
+        # passed deadline (the server has not advanced it) is not repeatedly re-counted
+        # as an unconfirmed overdue reset. Reset on a verified account switch.
+        self._reset_confirmed: dict[str, str] = {}
 
         # Adaptive polling state
         self._fast_polls_remaining = 0
@@ -341,6 +347,7 @@ class UsageMonitorForCodex:
             self._prev_entries = {}
             self._notified_thresholds = {}
             self._prev_extra_usage_pct = None
+            self._reset_confirmed = {}
             # A pending reset belongs to the OLD account; the new account has its own
             # deadlines. Leaving this set would keep idle/locked polling alive for a
             # switched-to account that has no due reset (unnecessary background wakes).
@@ -431,9 +438,25 @@ class UsageMonitorForCodex:
                 continue
             _, unit, _ = parsed
             reset_threshold = 95 if unit == 'hour' else 98
-            any_blocking = any(other_pct >= 99 for other_key, other_pct in effective_util.items() if other_key != key)
-            if prev > reset_threshold and pct < prev and not any_blocking:
-                firing.append((key, pct, prev))
+            if prev > reset_threshold and pct < prev:
+                # An overdue reset DROP has been OBSERVED for this window. Record it as
+                # confirmed for its retained deadline (if that deadline has passed),
+                # INDEPENDENT of any_blocking: the reset happened; blocking only
+                # suppresses the command (which is not replayed later), so a blocked-
+                # but-observed drop must not keep the idle retry alive after the blocker
+                # clears. A pre-deadline in-period dip (retained deadline still future)
+                # is not an overdue confirmation, so the passed-deadline gate excludes it.
+                retained_entry = self._prev_entries.get(key)
+                retained_rs = retained_entry.get('resets_at') if isinstance(retained_entry, dict) else None
+                if retained_rs:
+                    try:
+                        if datetime.fromisoformat(retained_rs) <= now:
+                            self._reset_confirmed[key] = retained_rs
+                    except (ValueError, TypeError):
+                        pass
+                any_blocking = any(other_pct >= 99 for other_key, other_pct in effective_util.items() if other_key != key)
+                if not any_blocking:
+                    firing.append((key, pct, prev))
 
         # Phase 2: purge EVERY firing expired-absent window up front (before running
         # any command), so each completed window reports as 0 in the reset command
@@ -449,12 +472,15 @@ class UsageMonitorForCodex:
                 self._prev_entries.pop(key, None)
                 self._notified_thresholds.pop(key, None)
 
-        # Phase 3: notify + run the reset command for each firing window.
+        # Phase 3: notify + run the reset command for each firing window. Whether to
+        # clear the idle reset-wait is decided once after Phase 4 (a fired reset alone
+        # is not enough - an expired sibling may still be awaiting confirmation).
+        reset_fired = False
         for key, pct, prev in firing:
             entry_payload: dict[str, Any] = {} if key in expired_absent else result.data.get(key, {})
             self._notify_or_defer('reset', T['notify_reset'], T['notify_reset_title'])
             self._run_reset_command(key, pct, prev, data=result.data, entry=entry_payload)
-            self._idle_reset_pending = False
+            reset_fired = True
 
         # Phase 4: retire EVERY window whose period has ENDED, independent of whether
         # its reset command fired. Disposal of an ended period's trusted state must be
@@ -469,6 +495,8 @@ class UsageMonitorForCodex:
         # already consumed the old value; firing expired-absent windows were purged in
         # Phase 2; the end-of-update merge re-records a present window's new-period
         # baseline and deadline.
+        had_overdue = False
+        still_awaiting = False
         for key in list(self._prev_entries):
             entry = self._prev_entries.get(key)
             resets_at = entry.get('resets_at') if isinstance(entry, dict) else None
@@ -479,16 +507,51 @@ class UsageMonitorForCodex:
                     continue  # period still active - keep the baseline
             except (ValueError, TypeError):
                 continue
+            # The retained deadline has passed: this window's reset is overdue and is
+            # being evaluated against this verified response (whether it then retires,
+            # or lingers under the KEEP guard below).
+            had_overdue = True
             current = result.data.get(key)
             if (isinstance(current, dict) and current.get('utilization') is not None
                     and current.get('resets_at') == resets_at):
                 # The same already-passed deadline is still reported (the server has
                 # not advanced the period yet): not a rollover, keep the baseline so
-                # the lingering value is not misread as a fresh period.
+                # the lingering value is not misread as a fresh period. This window is
+                # genuinely AWAITING its overdue reset only if a reset command is
+                # actually pending AND its drop has not yet been observed: it must be
+                # reset-command-ELIGIBLE (parseable - Phase 1 cannot fire for an
+                # unparseable fallback key like primary/secondary, so mirror its parse
+                # gate), still above its reset threshold (near-exhausted, no drop seen),
+                # and this exact deadline's reset not already recorded confirmed in
+                # _reset_confirmed. A low / unparseable / already-confirmed lingering
+                # window has no pending command and must not hold the idle retry open.
+                parsed_keep = parse_field_name(key)
+                if parsed_keep is not None:
+                    keep_threshold = 95 if parsed_keep[1] == 'hour' else 98
+                    if ((current.get('utilization') or 0) > keep_threshold
+                            and self._reset_confirmed.get(key) != resets_at):
+                        still_awaiting = True
                 continue
             self._prev_utilization.pop(key, None)
             self._prev_entries.pop(key, None)
             self._notified_thresholds.pop(key, None)
+
+        # Single decision point for the idle/lock reset-deadline wait. _idle_reset_pending
+        # is scheduler state ("an overdue reset still needs confirming"), not an event.
+        # The wait is COMPLETE when this verified response either confirmed a reset (a
+        # drop fired) OR actually evaluated an overdue window (had_overdue: a retained
+        # deadline had passed, whether the window then retired or lingered) - AND no
+        # window is still genuinely awaiting confirmation (present, unadvanced past
+        # deadline, still above its reset threshold, reset not already confirmed for
+        # that deadline). Requiring (reset_fired or had_overdue) avoids clearing the
+        # flag on a poll that only saw still-FUTURE deadlines (poll_loop armed it for an
+        # upcoming deadline and re-arms it via _seconds_until_next_reset); requiring
+        # `not still_awaiting` preserves the overdue retry (which _seconds_until_next_reset
+        # cannot schedule, as it ignores past deadlines) until the drop is seen. API
+        # error / identity-mismatch / session samples returned before this and never
+        # clear the flag.
+        if (reset_fired or had_overdue) and not still_awaiting:
+            self._idle_reset_pending = False
 
         self._check_threshold_alerts(result.data)
 
