@@ -52,7 +52,7 @@ from .settings import USAGE_SOURCE
 
 __all__ = [
     'API_URL_USAGE', 'CODEX_CONFIG_DIR', 'CODEX_AUTH', 'CODEX_SESSIONS_DIR',
-    'read_access_token', 'read_account_id', 'api_headers',
+    'read_access_token', 'read_account_id', 'read_effective_account_id', 'api_headers',
     'fetch_usage', 'fetch_profile', 'transform_rate_limits',
 ]
 
@@ -128,6 +128,22 @@ def _jwt_account_id(tokens: dict[str, Any] | None = None) -> str | None:
     if isinstance(auth, dict):
         return auth.get('chatgpt_account_id') or None
     return None
+
+
+def read_effective_account_id() -> str | None:
+    """The account id the live usage and profile are actually attributed to.
+
+    Prefers the explicit top-level ``account_id`` (sent as the ChatGPT-Account-Id
+    header), else falls back to the id-token JWT's ``chatgpt_account_id`` claim -
+    the SAME effective identity that :func:`_fetch_usage_api` stamps onto a live
+    result and that :func:`fetch_profile` decodes into the profile UUID. The
+    profile cache invalidates on a change here, so a same-token account switch
+    visible ONLY via the JWT claim (no top-level ``account_id``) still refreshes
+    the profile - otherwise live usage would stay mismatched against a stale
+    profile and Credits/events would be suppressed fail-closed indefinitely.
+    """
+    tokens = _read_tokens()
+    return tokens.get('account_id') or _jwt_account_id(tokens) or None
 
 
 def api_headers(tokens: dict[str, Any] | None = None) -> dict[str, str] | None:

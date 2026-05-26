@@ -27,6 +27,7 @@ from usage_monitor_for_codex.codex_api import (
     fetch_usage,
     read_access_token,
     read_account_id,
+    read_effective_account_id,
     transform_rate_limits,
 )
 from usage_monitor_for_codex.i18n import LOCALE_DIR
@@ -142,6 +143,42 @@ class TestReadAccountId(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             with patch('usage_monitor_for_codex.codex_api.CODEX_AUTH', Path(tmp) / 'nope.json'):
                 self.assertIsNone(read_account_id())
+
+
+class TestReadEffectiveAccountId(unittest.TestCase):
+    """Tests for read_effective_account_id() - the identity the profile cache keys
+    on: top-level account_id, else the id-token JWT's chatgpt_account_id (review
+    1727). Must match the identity that stamps usage and decodes the profile."""
+
+    def _auth_file(self, tmp, auth):
+        auth_file = Path(tmp) / 'auth.json'
+        auth_file.write_text(json.dumps(auth), encoding='utf-8')
+        return auth_file
+
+    def test_prefers_top_level_account_id(self):
+        """Top-level account_id wins and short-circuits the JWT decode."""
+        with TemporaryDirectory() as tmp:
+            auth_file = self._auth_file(tmp, {'tokens': {'access_token': 't', 'account_id': 'acct-top'}})
+            with patch('usage_monitor_for_codex.codex_api.CODEX_AUTH', auth_file), \
+                 patch('usage_monitor_for_codex.codex_api._jwt_account_id', return_value='acct-jwt') as mock_jwt:
+                self.assertEqual(read_effective_account_id(), 'acct-top')
+                mock_jwt.assert_not_called()
+
+    def test_falls_back_to_jwt_claim(self):
+        """With no top-level account_id, the id-token JWT's chatgpt_account_id is used."""
+        with TemporaryDirectory() as tmp:
+            auth_file = self._auth_file(tmp, {'tokens': {'access_token': 't'}})  # no account_id
+            with patch('usage_monitor_for_codex.codex_api.CODEX_AUTH', auth_file), \
+                 patch('usage_monitor_for_codex.codex_api._jwt_account_id', return_value='acct-jwt'):
+                self.assertEqual(read_effective_account_id(), 'acct-jwt')
+
+    def test_none_when_neither(self):
+        """No top-level account_id and no JWT claim returns None."""
+        with TemporaryDirectory() as tmp:
+            auth_file = self._auth_file(tmp, {'tokens': {'access_token': 't'}})
+            with patch('usage_monitor_for_codex.codex_api.CODEX_AUTH', auth_file), \
+                 patch('usage_monitor_for_codex.codex_api._jwt_account_id', return_value=None):
+                self.assertIsNone(read_effective_account_id())
 
 
 class TestApiHeaders(unittest.TestCase):
