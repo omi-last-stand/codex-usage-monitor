@@ -373,6 +373,27 @@ class TestFetchUsageApi(unittest.TestCase):
 
     @patch('usage_monitor_for_codex.codex_api.requests.get')
     @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
+    def test_idle_no_window_no_credits_kept(self, _mock_headers, mock_get):
+        """A successful payload with a recognized shape (plan_type) but no active
+        window and no credits is a legitimate 'no active usage' state (e.g. a window
+        just expired and no new one started), kept as a source='api' result - NOT
+        discarded as no_usage_data - so the app can fire on_reset_command for the
+        expired window and an idle account shows empty usage rather than an error
+        (review 2050)."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {'plan_type': 'plus', 'rate_limit': None}
+        mock_get.return_value = mock_resp
+
+        result = fetch_usage()
+        self.assertNotIn('error', result)
+        self.assertEqual(result['source'], 'api')
+        self.assertEqual(result['plan_type'], 'plus')
+        self.assertNotIn('five_hour', result)
+        self.assertNotIn('seven_day', result)
+        self.assertNotIn('extra_usage', result)
+
+    @patch('usage_monitor_for_codex.codex_api.requests.get')
+    @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
     def test_connection_error(self, _mock_headers, mock_get):
         """ConnectionError returns connection_error message."""
         mock_get.side_effect = requests.ConnectionError()

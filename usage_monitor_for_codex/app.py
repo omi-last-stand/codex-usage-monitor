@@ -387,24 +387,74 @@ class UsageMonitorForCodex:
         # window must still be suppressed. Overlay the current response on the
         # accumulated last-known state. (For normal Codex responses, which carry all
         # windows, this equals quota_fields, so behavior is unchanged.)
-        effective_util = {**self._prev_utilization, **quota_fields}
-        for key, pct in quota_fields.items():
+        # Build the reset-evaluation set: every window PRESENT in this response (at
+        # its current pct) PLUS any previously-observed window that is ABSENT from
+        # this verified response AND whose retained deadline has already PASSED. An
+        # expired window dropping out of the payload is a genuine reset completion
+        # (the live API may return a null rate_limit once no window is active, so the
+        # window simply disappears), evaluated as pct=0 so the existing
+        # near-exhausted-then-dropped rule fires the reset command exactly once. A
+        # window absent but still BEFORE its deadline is a transient partial omission
+        # (kept retained as before, NOT a reset).
+        now = datetime.now(timezone.utc)
+        expired_absent: set[str] = set()
+        reset_candidates: dict[str, float] = dict(quota_fields)
+        for key, entry in self._prev_entries.items():
+            if key in quota_fields:
+                continue
+            resets_at = entry.get('resets_at') if isinstance(entry, dict) else None
+            if not resets_at:
+                continue
+            try:
+                deadline_passed = datetime.fromisoformat(resets_at) <= now
+            except (ValueError, TypeError):
+                continue
+            if deadline_passed:
+                reset_candidates[key] = 0.0
+                expired_absent.add(key)
+
+        # "Is another window still blocking?" uses best-known current utilization:
+        # an expired-absent window counts as 0 (it reset), a present window at its
+        # current pct, any other retained window at its last-known value. Snapshot it
+        # BEFORE any purge below so the blocking view is stable.
+        effective_util = {**self._prev_utilization, **reset_candidates}
+
+        # Phase 1: decide which windows are a genuine reset - near-exhausted, dropped,
+        # and not blocked by another window still at >=99.
+        firing: list[tuple[str, float, float]] = []  # (key, current_pct, prev_pct)
+        for key, pct in reset_candidates.items():
             prev = self._prev_utilization.get(key)
             if prev is None:
                 continue
-
             parsed = parse_field_name(key)
             if parsed is None:
                 continue
-
             _, unit, _ = parsed
             reset_threshold = 95 if unit == 'hour' else 98
             any_blocking = any(other_pct >= 99 for other_key, other_pct in effective_util.items() if other_key != key)
-
             if prev > reset_threshold and pct < prev and not any_blocking:
-                self._notify_or_defer('reset', T['notify_reset'], T['notify_reset_title'])
-                self._run_reset_command(key, pct, prev, data=result.data, entry=result.data.get(key, {}))
-                self._idle_reset_pending = False
+                firing.append((key, pct, prev))
+
+        # Phase 2: purge EVERY firing expired-absent window up front (before running
+        # any command), so each completed window reports as 0 in the reset command
+        # payload - even when several windows expire in the SAME response, where
+        # otherwise the first command would still read a sibling's stale pre-reset
+        # value via _prev_utilization - and so none can re-fire on a later response
+        # that also omits it. A genuinely new window arriving later re-baselines
+        # cleanly. Present windows are not purged here: the end-of-update merge
+        # refreshes them, and the command reads their current value from the payload.
+        for key, _pct, _prev in firing:
+            if key in expired_absent:
+                self._prev_utilization.pop(key, None)
+                self._prev_entries.pop(key, None)
+                self._notified_thresholds.pop(key, None)
+
+        # Phase 3: notify + run the reset command for each firing window.
+        for key, pct, prev in firing:
+            entry_payload: dict[str, Any] = {} if key in expired_absent else result.data.get(key, {})
+            self._notify_or_defer('reset', T['notify_reset'], T['notify_reset_title'])
+            self._run_reset_command(key, pct, prev, data=result.data, entry=entry_payload)
+            self._idle_reset_pending = False
 
         self._check_threshold_alerts(result.data)
 

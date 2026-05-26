@@ -265,7 +265,17 @@ def _fetch_usage_api() -> dict[str, Any]:
     # whose primary rate_limit is absent, and discarding a valid credit balance
     # just because no usage window is present would hide it from the user.
     if not _has_quota(result) and not result.get('extra_usage'):
-        return {'error': T['no_usage_data']}
+        # No active window and no credits. If the payload still carries a recognized
+        # usage shape (plan_type present), this is a legitimate "no active usage"
+        # state - e.g. a near-exhausted window EXPIRED and no new one has started yet
+        # (rate_limit goes null) - NOT a fetch error. Pass it through (source-stamped
+        # below) so the app can recognize the window's reset completion and fire
+        # on_reset_command, and so an idle account renders an empty usage list rather
+        # than an error. Only a payload with NO recognized usage shape at all (no
+        # plan_type, e.g. an unexpected/garbage body) is still treated as
+        # no_usage_data.
+        if not result.get('plan_type'):
+            return {'error': T['no_usage_data']}
     result['source'] = 'api'
     # Stamp the account this usage was fetched for (captured above, before the
     # request), so the popup shows the account block / Credits only when they

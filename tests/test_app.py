@@ -1135,10 +1135,14 @@ class TestSecondsUntilNextReset(unittest.TestCase):
         wholesale replace)."""
         self.app.cache = MagicMock()
         self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        # Deadlines are in the FUTURE: the credits-only omission is a TRANSIENT
+        # partial response (before the window expires), so the deadline must be
+        # retained - NOT an expired-window reset (which review 2050 handles via the
+        # deadline-passed path, covered by TestExpiredWindowReset).
         self.app.cache.update.side_effect = [
             UpdateResult(data={
-                'five_hour': {'utilization': 97.0, 'resets_at': '2025-01-15T12:30:00+00:00'},
-                'seven_day': {'utilization': 10.0, 'resets_at': '2025-01-18T00:00:00+00:00'},
+                'five_hour': {'utilization': 97.0, 'resets_at': '2099-01-15T12:30:00+00:00'},
+                'seven_day': {'utilization': 10.0, 'resets_at': '2099-01-18T00:00:00+00:00'},
                 'source': 'api', 'account_id': 'acct-A',
             }),
             UpdateResult(data={
@@ -1151,11 +1155,11 @@ class TestSecondsUntilNextReset(unittest.TestCase):
 
         # The retained verified entry survives; the raw latest response does not carry it.
         self.assertIn('five_hour', self.app._prev_entries)
-        self.assertEqual(self.app._prev_entries['five_hour']['resets_at'], '2025-01-15T12:30:00+00:00')
+        self.assertEqual(self.app._prev_entries['five_hour']['resets_at'], '2099-01-15T12:30:00+00:00')
         self.assertNotIn('five_hour', self.app._last_response)
 
         with patch('usage_monitor_for_codex.app.datetime') as mock_dt:
-            mock_dt.now.return_value = datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+            mock_dt.now.return_value = datetime(2099, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
             mock_dt.fromisoformat = datetime.fromisoformat
             result = self.app._seconds_until_next_reset()
         assert result is not None
@@ -1569,6 +1573,150 @@ class TestResetCommand(unittest.TestCase):
         self.assertEqual(mock_cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'reset')
         self.assertIn('reset', self.app._deferred_notifications)
         self.app.icon.notify.assert_not_called()
+
+
+class TestExpiredWindowReset(unittest.TestCase):
+    """on_reset_command fires when a near-exhausted quota window EXPIRES and drops out
+    of a verified response (review 2050 [P2]). A window absent AFTER its retained
+    deadline has passed is a genuine reset completion (the live API returns no active
+    window once it expires), evaluated as pct=0. A window absent but still BEFORE its
+    deadline stays a transient partial omission and does not fire."""
+
+    PAST = '2020-01-01T00:00:00+00:00'
+    FUTURE = '2099-01-01T00:00:00+00:00'
+
+    def setUp(self):
+        self.app = _make_app()
+        self._cmd_patch = patch('usage_monitor_for_codex.app.run_event_command')
+        self._cmd = self._cmd_patch.start()
+        self._on_patch = patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['echo reset'])
+        self._on_patch.start()
+        self._tt_patch = patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+        self._tt_patch.start()
+        self._icon_patch = patch('usage_monitor_for_codex.app.load_tray_icon')
+        self._icon_patch.start()
+
+    def tearDown(self):
+        for p in (self._icon_patch, self._tt_patch, self._on_patch, self._cmd_patch):
+            p.stop()
+        _cleanup(self.app)
+
+    def _reset_calls(self, variant=None):
+        return [
+            c for c in self._cmd.call_args_list
+            if c[0][1].get('USAGE_MONITOR_EVENT') == 'reset'
+            and (variant is None or c[0][1].get('USAGE_MONITOR_VARIANT') == variant)
+        ]
+
+    def _feed(self, data):
+        self.app.cache = MagicMock()
+        self.app.cache.update.return_value = UpdateResult(data=data)
+        self.app.update()
+
+    def test_expired_five_hour_disappears_seven_day_remains_fires_once(self):
+        """primary window expires and leaves the payload while the weekly window
+        remains -> the five_hour reset command fires once (review 2050 repro 1)."""
+        self.app._idle_reset_pending = True
+        self.app._prev_utilization = {'five_hour': 97.0, 'seven_day': 12.0}
+        self.app._prev_entries = {
+            'five_hour': {'utilization': 97.0, 'resets_at': self.PAST},
+            'seven_day': {'utilization': 12.0, 'resets_at': self.FUTURE},
+        }
+
+        self._feed({'seven_day': {'utilization': 12.0, 'resets_at': self.FUTURE}})
+
+        calls = self._reset_calls('five_hour')
+        self.assertEqual(len(calls), 1)
+        env = calls[0][0][1]
+        self.assertEqual(env['USAGE_MONITOR_UTILIZATION'], '0')       # no active window
+        self.assertEqual(env['USAGE_MONITOR_PREV_UTILIZATION'], '97')
+        self.assertEqual(env['USAGE_MONITOR_UTILIZATION_FIVE_HOUR'], '0')
+        # five_hour purged so it cannot re-fire; seven_day retained; pending cleared
+        self.assertNotIn('five_hour', self.app._prev_utilization)
+        self.assertNotIn('five_hour', self.app._prev_entries)
+        self.assertIn('seven_day', self.app._prev_utilization)
+        self.assertFalse(self.app._idle_reset_pending)
+
+    def test_expired_five_hour_disappears_credits_only_fires_once(self):
+        """primary window expires and the response becomes Credits-only Pro (no quota
+        window at all) -> the five_hour reset command still fires (review 2050 repro 2)."""
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.PAST}}
+
+        self._feed({'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}})
+
+        self.assertEqual(len(self._reset_calls('five_hour')), 1)
+        self.assertNotIn('five_hour', self.app._prev_utilization)
+
+    def test_absent_window_before_deadline_is_not_a_reset(self):
+        """A window absent but still BEFORE its deadline is a transient partial
+        omission: no reset command, and the retained deadline is preserved."""
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.FUTURE}}
+
+        self._feed({'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}})
+
+        self.assertEqual(self._reset_calls('five_hour'), [])
+        self.assertEqual(self.app._prev_utilization.get('five_hour'), 97.0)
+        self.assertEqual(self.app._prev_entries['five_hour']['resets_at'], self.FUTURE)
+
+    def test_expired_disappearance_does_not_refire_on_repeat(self):
+        """A second (and later) verified response that also omits the expired window
+        must not re-run the reset command - the window was purged on the first fire."""
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.PAST}}
+
+        self._feed({'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}})
+        self._feed({'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}})
+
+        self.assertEqual(len(self._reset_calls('five_hour')), 1)
+
+    def test_expired_five_hour_suppressed_when_seven_day_blocking(self):
+        """When the expired five_hour completes but seven_day is still blocking (>=99),
+        the existing any-blocking rule suppresses the reset command (review 2050)."""
+        self.app._prev_utilization = {'five_hour': 97.0, 'seven_day': 99.0}
+        self.app._prev_entries = {
+            'five_hour': {'utilization': 97.0, 'resets_at': self.PAST},
+            'seven_day': {'utilization': 99.0, 'resets_at': self.FUTURE},
+        }
+
+        self._feed({'seven_day': {'utilization': 99.0, 'resets_at': self.FUTURE}})
+
+        self.assertEqual(self._reset_calls('five_hour'), [])
+
+    def test_two_windows_expire_together_both_fire_zeroed_payload(self):
+        """When BOTH windows expire and drop out in the same response, both reset
+        commands fire and each payload reports BOTH windows as 0 - no stale sibling
+        value leaking from the not-yet-purged window (review 2050 Codex re-review)."""
+        self.app._prev_utilization = {'five_hour': 97.0, 'seven_day': 99.0}
+        self.app._prev_entries = {
+            'five_hour': {'utilization': 97.0, 'resets_at': self.PAST},
+            'seven_day': {'utilization': 99.0, 'resets_at': self.PAST},
+        }
+
+        self._feed({'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}})
+
+        calls = self._reset_calls()
+        self.assertEqual(sorted(c[0][1]['USAGE_MONITOR_VARIANT'] for c in calls), ['five_hour', 'seven_day'])
+        for c in calls:
+            env = c[0][1]
+            self.assertEqual(env['USAGE_MONITOR_UTILIZATION_FIVE_HOUR'], '0')
+            self.assertEqual(env['USAGE_MONITOR_UTILIZATION_SEVEN_DAY'], '0')
+        self.assertEqual(self.app._prev_utilization, {})
+
+    def test_fully_empty_idle_response_fires_expired_reset(self):
+        """A fully-empty verified idle response (plan_type only: a window expired with
+        no new one and no credits) still fires the reset command for the expired
+        window. codex_api passes such an idle response through rather than discarding
+        it as no_usage_data, so it reaches reset detection - covering the no-credits
+        seven_day -> empty transition (review 2050 Codex re-review)."""
+        self.app._prev_utilization = {'seven_day': 99.0}
+        self.app._prev_entries = {'seven_day': {'utilization': 99.0, 'resets_at': self.PAST}}
+
+        self._feed({'plan_type': 'plus'})
+
+        self.assertEqual(len(self._reset_calls('seven_day')), 1)
+        self.assertNotIn('seven_day', self.app._prev_utilization)
 
 
 class TestThresholdCommand(unittest.TestCase):
