@@ -437,7 +437,10 @@ def _scan_file_for_rate_limits(path: Path) -> dict[str, Any] | None:
     """Return the last ``rate_limits`` snapshot in a rollout file, or None."""
     latest: dict[str, Any] | None = None
     try:
-        with path.open('r', encoding='utf-8') as handle:
+        # errors='replace': a rollout file may be mid-write, so a truncated
+        # multibyte sequence must not raise UnicodeDecodeError and crash the
+        # poll loop - the affected line simply fails json.loads and is skipped.
+        with path.open('r', encoding='utf-8', errors='replace') as handle:
             for line in handle:
                 if '"rate_limits"' not in line:
                     continue
@@ -448,7 +451,7 @@ def _scan_file_for_rate_limits(path: Path) -> dict[str, Any] | None:
                 snapshot = _extract_record_rate_limits(record)
                 if snapshot:
                     latest = snapshot
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     return latest
 

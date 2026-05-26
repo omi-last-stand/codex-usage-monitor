@@ -259,11 +259,22 @@ class UsageMonitorForCodex:
             return
 
         # Re-baseline change-detection when the data source changes (live API
-        # <-> local session fallback): a stale sample from the other source
-        # must not be misread as a quota reset or threshold crossing.
+        # <-> local session fallback). The freshly-switched sample may be stale
+        # relative to the other source, so establish new baselines SILENTLY and
+        # skip this cycle: do not fire reset or threshold events. Otherwise a
+        # stale value could be misread as a quota reset or threshold crossing,
+        # and source flapping could re-fire alerts/commands repeatedly. A genuine
+        # change is detected on the next same-source poll.
         source = result.data.get('source')
         if self._prev_source is not None and source != self._prev_source:
-            self._prev_utilization = {}
+            self._prev_source = source
+            self._prev_utilization = {
+                key: (value.get('utilization', 0) or 0)
+                for key, value in result.data.items()
+                if key != 'extra_usage' and isinstance(value, dict) and 'utilization' in value
+            }
+            self._seed_threshold_baseline(result.data)
+            return
         self._prev_source = source
 
         # Detect account switch: re-fetch profile if the access token changed, then compare UUIDs.
@@ -359,6 +370,31 @@ class UsageMonitorForCodex:
         for message, title in self._deferred_notifications.values():
             self.icon.notify(message, title)
         self._deferred_notifications.clear()
+
+    def _seed_threshold_baseline(self, data: dict[str, Any]) -> None:
+        """Seed notified-threshold baselines from the current sample without firing.
+
+        Used when the data source switches (live API <-> session fallback) so an
+        already-exceeded threshold in the freshly-switched sample is treated as
+        already-notified and does not emit a spurious alert or command.  A genuine
+        later increase past a higher threshold still fires on the next poll.
+        """
+        for variant_key, entry in data.items():
+            if variant_key == 'extra_usage':
+                continue
+            if not isinstance(entry, dict) or entry.get('utilization') is None:
+                continue
+            pct = entry['utilization']
+            exceeded = [t for t in get_alert_thresholds(variant_key) if pct >= t]
+            self._notified_thresholds[variant_key] = max(exceeded) if exceeded else 0
+
+        extra = data.get('extra_usage')
+        if extra and extra.get('is_enabled'):
+            limit = extra.get('monthly_limit', 0) or 0
+            if limit > 0:
+                pct = (extra.get('used_credits', 0) or 0) / limit * 100
+                exceeded = [t for t in get_alert_thresholds('extra_usage') if pct >= t]
+                self._notified_thresholds['extra_usage'] = max(exceeded) if exceeded else 0
 
     def _check_threshold_alerts(self, data: dict[str, Any]) -> None:
         """Show a notification when usage crosses a configured threshold.

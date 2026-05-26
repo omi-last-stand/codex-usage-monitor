@@ -607,6 +607,26 @@ class TestSessionFallback(unittest.TestCase):
                 result = fetch_usage()
         self.assertEqual(result, {'error': EN['no_session_data']})
 
+    @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'session')
+    def test_session_tolerates_invalid_utf8(self):
+        """A rollout file mid-write (truncated multibyte) must not crash the scan."""
+        with TemporaryDirectory() as tmp:
+            sessions = Path(tmp)
+            day = sessions / '2026' / '05' / '26'
+            day.mkdir(parents=True)
+            rollout = day / 'rollout-2026-05-26T00-00-00-bad.jsonl'
+            valid = json.dumps({
+                'type': 'event_msg',
+                'payload': {'type': 'token_count', 'info': {'rate_limits': CANONICAL_RATE_LIMITS}},
+            })
+            # First line carries invalid/truncated UTF-8 bytes; second line is valid.
+            rollout.write_bytes(b'\xff\xfe broken line\n' + valid.encode('utf-8') + b'\n')
+            with patch('usage_monitor_for_codex.codex_api.CODEX_SESSIONS_DIR', sessions):
+                result = fetch_usage()
+
+        self.assertEqual(result['source'], 'session')
+        self.assertEqual(result['five_hour']['utilization'], 4.0)
+
     @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'auto')
     @patch('usage_monitor_for_codex.codex_api.requests.get', side_effect=requests.ConnectionError())
     @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})

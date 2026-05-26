@@ -244,6 +244,20 @@ class TestLoadTranslations(unittest.TestCase):
 
         self.assertEqual(result['title'], 'English')
 
+    def test_non_dict_overlay_keeps_english_base(self):
+        """A locale file that is valid JSON but not an object is ignored, keeping English."""
+        with TemporaryDirectory() as tmp:
+            locale_dir = Path(tmp)
+            (locale_dir / 'en.json').write_text('{"title": "English"}')
+            (locale_dir / 'de.json').write_text('["not", "an", "object"]')
+
+            with patch('usage_monitor_for_codex.settings.LANGUAGE', 'de'), \
+                 patch('usage_monitor_for_codex.i18n.LOCALE_DIR', locale_dir), \
+                 patch('usage_monitor_for_codex.widget_state.load_language', return_value=''):
+                result = load_translations()
+
+        self.assertEqual(result['title'], 'English')
+
 
 # ---------------------------------------------------------------------------
 # locale file consistency

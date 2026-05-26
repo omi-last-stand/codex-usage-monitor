@@ -82,10 +82,17 @@ def load_translations() -> dict[str, Any]:
         lang = locale.getlocale()[0] or ''
         code = detect_lang_code(lang)
 
-    translations = _load_file('en')
+    try:
+        translations = _load_file('en')
+    except (OSError, json.JSONDecodeError):
+        translations = {}
+    if not isinstance(translations, dict):
+        translations = {}
     if code != 'en':
         try:
-            translations.update(_load_file(code))
+            overlay = _load_file(code)
+            if isinstance(overlay, dict):
+                translations.update(overlay)
         except (OSError, json.JSONDecodeError):
             pass
     return translations

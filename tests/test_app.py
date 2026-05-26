@@ -2289,5 +2289,64 @@ class TestStartupCommand(unittest.TestCase):
         self.assertNotEqual(env['USAGE_MONITOR_RESETS_AT_SEVEN_DAY'], '')
 
 
+class TestSourceSwitchGuard(unittest.TestCase):
+    """Re-baselining and alert suppression when the data source flips (api <-> session)."""
+
+    def setUp(self):
+        self.app = _make_app(thresholds=[80, 95])
+        self._cmd_patch = patch('usage_monitor_for_codex.app.run_event_command')
+        self._cmd = self._cmd_patch.start()
+
+    def tearDown(self):
+        self._cmd_patch.stop()
+        _cleanup(self.app)
+
+    def _feed(self, util: float, source: str) -> None:
+        self.app.cache = MagicMock()
+        self.app.cache.update.return_value = UpdateResult(
+            data={'five_hour': {'utilization': util, 'resets_at': ''}, 'source': source},
+        )
+        self.app.update()
+
+    def test_first_poll_establishes_source_without_switch(self):
+        """The first poll sets the source baseline and processes normally."""
+        self._feed(82, 'api')
+        self.app.icon.notify.assert_called_once()  # crosses 80 like a normal first sample
+        self.assertEqual(self.app._prev_source, 'api')
+
+    def test_switch_suppresses_threshold_notification(self):
+        """A stale high sample after an api->session switch must not alert."""
+        self._feed(10, 'api')
+        self.app.icon.notify.reset_mock()
+        self._feed(90, 'session')  # source switch
+        self.app.icon.notify.assert_not_called()
+        # baseline seeded so 90 is treated as already-notified at the 80 threshold
+        self.assertEqual(self.app._notified_thresholds.get('five_hour'), 80)
+        self.assertEqual(self.app._prev_source, 'session')
+
+    def test_genuine_increase_after_switch_still_alerts(self):
+        """A real increase on the next same-source poll fires normally."""
+        self._feed(10, 'api')
+        self._feed(90, 'session')  # switch: seed 80, no fire
+        self.app.icon.notify.reset_mock()
+        self._feed(96, 'session')  # same source, crosses 95
+        self.app.icon.notify.assert_called_once()
+
+    def test_switch_suppresses_reset_notification(self):
+        """A drop caused by switching sources must not be read as a quota reset."""
+        self._feed(99, 'api')  # high (fires once on this first sample)
+        self.app.icon.notify.reset_mock()
+        self._feed(3, 'session')  # switch + big drop -> no reset notification
+        self.app.icon.notify.assert_not_called()
+
+    def test_repeated_flapping_does_not_fire(self):
+        """Every poll being a source switch suppresses alerts entirely (no spurious fire)."""
+        self._feed(10, 'api')  # establish, low
+        self.app.icon.notify.reset_mock()
+        for src, util in (('session', 90), ('api', 91), ('session', 92), ('api', 93)):
+            self._feed(util, src)
+        self.app.icon.notify.assert_not_called()
+
+
 if __name__ == '__main__':
     unittest.main()
