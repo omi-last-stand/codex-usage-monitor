@@ -258,24 +258,27 @@ class UsageMonitorForCodex:
         if 'error' in result.data:
             return
 
-        # Re-baseline change-detection when the data source changes (live API
-        # <-> local session fallback). The freshly-switched sample may be stale
-        # relative to the other source, so establish new baselines SILENTLY and
-        # skip this cycle: do not fire reset or threshold events. Otherwise a
-        # stale value could be misread as a quota reset or threshold crossing,
-        # and source flapping could re-fire alerts/commands repeatedly. A genuine
-        # change is detected on the next same-source poll.
+        # Collect all quota fields with utilization (extra_usage has a different structure)
+        quota_fields: dict[str, float] = {}
+        for key, value in result.data.items():
+            if key == 'extra_usage':
+                continue
+            if isinstance(value, dict) and 'utilization' in value:
+                quota_fields[key] = value.get('utilization', 0) or 0
+
+        # Local session-fallback data (and the first sample after any source
+        # switch) is unverified - it may be stale or from a different account -
+        # so it must drive the DISPLAY only, never notifications or event
+        # commands. Re-baseline silently and skip: a genuine change is acted on
+        # later from a verified live (api) sample. This also prevents source
+        # flapping from re-firing alerts/commands.
         source = result.data.get('source')
-        if self._prev_source is not None and source != self._prev_source:
-            self._prev_source = source
-            self._prev_utilization = {
-                key: (value.get('utilization', 0) or 0)
-                for key, value in result.data.items()
-                if key != 'extra_usage' and isinstance(value, dict) and 'utilization' in value
-            }
+        source_changed = self._prev_source is not None and source != self._prev_source
+        self._prev_source = source
+        if source == 'session' or source_changed:
+            self._prev_utilization = quota_fields
             self._seed_threshold_baseline(result.data)
             return
-        self._prev_source = source
 
         # Detect account switch: re-fetch profile if the access token changed, then compare UUIDs.
         # When the user runs 'codex login', the token changes and the next profile fetch
@@ -293,16 +296,11 @@ class UsageMonitorForCodex:
             return
         self._prev_account_uuid = current_account_uuid
 
-        # Collect all quota fields with utilization (extra_usage has a different structure)
-        quota_fields: dict[str, float] = {}
-        for key, value in result.data.items():
-            if key == 'extra_usage':
-                continue
-            if isinstance(value, dict) and 'utilization' in value:
-                quota_fields[key] = value.get('utilization', 0) or 0
-
-        # Notify when quota resets after being nearly exhausted, but only if no other quota is blocking usage.
-        # While idle/locked, defer notifications until the user returns (avoids lock screen privacy concerns).
+        # Quota reset: notify AND run the reset command only on a *genuine* reset -
+        # usage was near-exhausted and then dropped, with no other quota blocking.
+        # A minor dip of the rolling window is not a reset and must not trigger an
+        # auto-command such as `codex resume`. While idle/locked, notifications are
+        # deferred until the user returns (avoids lock-screen privacy concerns).
         for key, pct in quota_fields.items():
             prev = self._prev_utilization.get(key)
             if prev is None:
@@ -318,11 +316,6 @@ class UsageMonitorForCodex:
 
             if prev > reset_threshold and pct < prev and not any_blocking:
                 self._notify_or_defer('reset', T['notify_reset'], T['notify_reset_title'])
-
-        # Run reset command on any detected usage drop (independent of notification threshold)
-        for key, pct in quota_fields.items():
-            prev = self._prev_utilization.get(key)
-            if prev is not None and pct < prev:
                 self._run_reset_command(key, pct, prev, data=result.data, entry=result.data.get(key, {}))
                 self._idle_reset_pending = False
 

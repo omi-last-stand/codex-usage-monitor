@@ -79,5 +79,7 @@
     "status_refreshing": "Actualisation...",
     "already_running": "Codex Usage Monitor v{running_version} est déjà en cours d'exécution.\n\nVoulez-vous remplacer l'instance en cours ?",
     "credits_unlimited": "Illimité",
-    "credits_remaining": "{balance} crédits restants"
+    "credits_remaining": "{balance} crédits restants",
+    "status_local_snapshot": "Instantané local · API en direct indisponible",
+    "replace_failed": "Impossible de remplacer l'instance en cours : elle est toujours active."
 }

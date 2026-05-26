@@ -105,7 +105,9 @@ class TestEnsureSingleInstance(unittest.TestCase):
     @patch(f'{MODULE}.ctypes')
     def test_duplicate_user_accepts_returns_true(self, mock_ctypes, mock_store, mock_read, mock_terminate):
         """Duplicate detected, user clicks Yes - terminates old instance and returns True."""
-        mock_ctypes.get_last_error.return_value = 0xB7
+        # 1st call: duplicate detected (ALREADY_EXISTS); 2nd call (after the mutex
+        # is re-created): success, so the replacing instance proceeds.
+        mock_ctypes.get_last_error.side_effect = [0xB7, 0]
         mock_kernel32 = MagicMock()
         mock_kernel32.CreateMutexW.return_value = 42
 
@@ -120,6 +122,28 @@ class TestEnsureSingleInstance(unittest.TestCase):
         self.assertTrue(result)
         mock_terminate.assert_called_once_with(99999)
         self.assertEqual(mock_store.call_count, 1)
+
+    @patch(f'{MODULE}._terminate_pid', return_value=False)
+    @patch(f'{MODULE}._read_holder_info', return_value=(None, None))
+    @patch(f'{MODULE}._store_holder_info')
+    @patch(f'{MODULE}.ctypes')
+    def test_duplicate_replace_fails_when_still_held(self, mock_ctypes, mock_store, mock_read, mock_terminate):
+        """If the mutex is still held after the replace attempt (PID unknown or
+        termination failed), do NOT start a duplicate: return False and don't store."""
+        mock_ctypes.get_last_error.return_value = 0xB7  # still ALREADY_EXISTS after re-create
+        mock_kernel32 = MagicMock()
+        mock_kernel32.CreateMutexW.return_value = 42
+
+        mock_user32 = MagicMock()
+        mock_user32.MessageBoxW.return_value = 6  # IDYES
+
+        with patch(f'{MODULE}._kernel32', mock_kernel32), \
+             patch(f'{MODULE}.ctypes.windll.user32', mock_user32):
+            from usage_monitor_for_codex.single_instance import ensure_single_instance
+            result = ensure_single_instance()
+
+        self.assertFalse(result)
+        mock_store.assert_not_called()
 
     @patch(f'{MODULE}._read_holder_info', return_value=(99999, '1.9.0'))
     @patch(f'{MODULE}.ctypes')

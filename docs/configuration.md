@@ -45,6 +45,9 @@ Configure usage percentage thresholds that trigger Windows notifications. The pr
 | `alert_time_aware` | `true` | Only alert when usage outpaces elapsed time |
 | `alert_time_aware_below` | `90` | Time-aware check applies only to thresholds below this value; thresholds at or above always fire |
 
+> [!NOTE]
+> `alert_thresholds_extra_usage` applies only to the legacy used/limit ratio model. It is **inactive for Codex credit balances**, which are shown as a balance or "Unlimited" with no spend percentage to compare against a threshold (see [API Reference](api-reference.md#extra-usage-credits), "Extra usage (credits)").
+
 Threshold lookup uses a fallback chain: exact match (e.g. `alert_thresholds_seven_day`), then base period, then no alerts. This lets you configure stricter thresholds per variant when needed:
 
 ```json

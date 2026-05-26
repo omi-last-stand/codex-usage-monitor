@@ -79,5 +79,7 @@
     "status_refreshing": "Refreshing...",
     "already_running": "Codex Usage Monitor v{running_version} is already running.\n\nDo you want to replace the running instance?",
     "credits_unlimited": "Unlimited",
-    "credits_remaining": "{balance} credits remaining"
+    "credits_remaining": "{balance} credits remaining",
+    "status_local_snapshot": "Local snapshot · live API unavailable",
+    "replace_failed": "Could not replace the running instance - it is still active."
 }

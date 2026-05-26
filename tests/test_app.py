@@ -1262,8 +1262,8 @@ class TestResetCommand(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
     def test_reset_command_fires_on_7d_drop(self, _icon, _tooltip, mock_cmd):
-        """Reset command fires when 7d usage drops."""
-        self.app._prev_utilization = {'five_hour': 50.0, 'seven_day': 60.0}
+        """Reset command fires when 7d usage drops from near-exhaustion."""
+        self.app._prev_utilization = {'five_hour': 50.0, 'seven_day': 99.0}
         data = {'five_hour': {'utilization': 50.0}, 'seven_day': {'utilization': 10.0, 'resets_at': '2025-01-20T00:00:00Z'}}
         self.app.cache = MagicMock()
         self.app.cache.update.return_value = UpdateResult(data=data)
@@ -1273,7 +1273,7 @@ class TestResetCommand(unittest.TestCase):
         mock_cmd.assert_called_once()
         env = mock_cmd.call_args[0][1]
         self.assertEqual(env['USAGE_MONITOR_VARIANT'], 'seven_day')
-        self.assertEqual(env['USAGE_MONITOR_PREV_UTILIZATION'], '60')
+        self.assertEqual(env['USAGE_MONITOR_PREV_UTILIZATION'], '99')
         self.assertEqual(env['USAGE_MONITOR_UTILIZATION_FIVE_HOUR'], '50')
         self.assertEqual(env['USAGE_MONITOR_UTILIZATION_SEVEN_DAY'], '10')
 
@@ -1281,8 +1281,8 @@ class TestResetCommand(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.run_event_command')
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
-    def test_reset_command_fires_on_any_drop_not_just_exhausted(self, _icon, _tooltip, mock_cmd):
-        """Reset command fires on any usage drop, not just from near-exhaustion."""
+    def test_reset_command_not_fired_on_minor_drop(self, _icon, _tooltip, mock_cmd):
+        """A minor dip of the rolling window is NOT a reset and must not run the command."""
         self.app._prev_utilization = {'five_hour': 30.0, 'seven_day': 10.0}
         data = {'five_hour': {'utilization': 5.0}, 'seven_day': {'utilization': 10.0}}
         self.app.cache = MagicMock()
@@ -1290,10 +1290,7 @@ class TestResetCommand(unittest.TestCase):
 
         self.app.update()
 
-        mock_cmd.assert_called_once()
-        env = mock_cmd.call_args[0][1]
-        self.assertEqual(env['USAGE_MONITOR_PREV_UTILIZATION'], '30')
-        self.assertEqual(env['USAGE_MONITOR_UTILIZATION'], '5')
+        mock_cmd.assert_not_called()
 
     @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['echo reset'])
     @patch('usage_monitor_for_codex.app.run_event_command')
@@ -1301,7 +1298,7 @@ class TestResetCommand(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.load_tray_icon')
     def test_reset_command_missing_resets_at(self, _icon, _tooltip, mock_cmd):
         """USAGE_MONITOR_RESETS_AT is empty string when resets_at is absent from data."""
-        self.app._prev_utilization = {'five_hour': 80.0, 'seven_day': 10.0}
+        self.app._prev_utilization = {'five_hour': 96.0, 'seven_day': 10.0}
         data = {'five_hour': {'utilization': 5.0}, 'seven_day': {'utilization': 10.0}}
         self.app.cache = MagicMock()
         self.app.cache.update.return_value = UpdateResult(data=data)
@@ -1347,8 +1344,8 @@ class TestResetCommand(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
     def test_both_quotas_drop_fires_two_commands(self, _icon, _tooltip, mock_cmd):
-        """Two commands fire when both 5h and 7d usage drop simultaneously."""
-        self.app._prev_utilization = {'five_hour': 95.0, 'seven_day': 80.0}
+        """Two commands fire when both 5h and 7d usage drop from near-exhaustion."""
+        self.app._prev_utilization = {'five_hour': 96.0, 'seven_day': 99.0}
         data = {'five_hour': {'utilization': 10.0}, 'seven_day': {'utilization': 20.0}}
         self.app.cache = MagicMock()
         self.app.cache.update.return_value = UpdateResult(data=data)
@@ -1917,9 +1914,9 @@ class TestIdleResetPendingCleared(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
     def test_5h_drop_clears_idle_reset_pending(self, _icon, _tooltip, _cmd):
-        """_idle_reset_pending is cleared when a 5h usage drop is detected."""
+        """_idle_reset_pending is cleared when a 5h quota reset (near-exhaustion drop) is detected."""
         self.app._idle_reset_pending = True
-        self.app._prev_utilization = {'five_hour': 80.0, 'seven_day': 10.0}
+        self.app._prev_utilization = {'five_hour': 96.0, 'seven_day': 10.0}
         data = {'five_hour': {'utilization': 5.0}, 'seven_day': {'utilization': 10.0}}
         self.app.cache = MagicMock()
         self.app.cache.update.return_value = UpdateResult(data=data)
@@ -1933,9 +1930,9 @@ class TestIdleResetPendingCleared(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
     def test_7d_drop_clears_idle_reset_pending(self, _icon, _tooltip, _cmd):
-        """_idle_reset_pending is cleared when a 7d usage drop is detected."""
+        """_idle_reset_pending is cleared when a 7d quota reset (near-exhaustion drop) is detected."""
         self.app._idle_reset_pending = True
-        self.app._prev_utilization = {'five_hour': 10.0, 'seven_day': 60.0}
+        self.app._prev_utilization = {'five_hour': 10.0, 'seven_day': 99.0}
         data = {'five_hour': {'utilization': 10.0}, 'seven_day': {'utilization': 5.0}}
         self.app.cache = MagicMock()
         self.app.cache.update.return_value = UpdateResult(data=data)
@@ -2324,13 +2321,26 @@ class TestSourceSwitchGuard(unittest.TestCase):
         self.assertEqual(self.app._notified_thresholds.get('five_hour'), 80)
         self.assertEqual(self.app._prev_source, 'session')
 
-    def test_genuine_increase_after_switch_still_alerts(self):
-        """A real increase on the next same-source poll fires normally."""
+    def test_increase_after_returning_to_api_alerts(self):
+        """After a session detour, a live increase past a threshold fires again.
+
+        Session data never alerts; alerts resume only from verified live (api)
+        samples, and only on a real increase (not the re-baseline cycle).
+        """
         self._feed(10, 'api')
-        self._feed(90, 'session')  # switch: seed 80, no fire
+        self._feed(90, 'session')  # session: display only, baseline seeded, no fire
+        self._feed(50, 'api')      # back to live (source change): re-baseline, no fire
         self.app.icon.notify.reset_mock()
-        self._feed(96, 'session')  # same source, crosses 95
+        self._feed(96, 'api')      # live increase past 95 -> fires
         self.app.icon.notify.assert_called_once()
+
+    def test_session_data_never_fires_alerts(self):
+        """A genuine threshold crossing seen only in session data does not alert."""
+        self._feed(10, 'api')
+        self.app.icon.notify.reset_mock()
+        self._feed(96, 'session')  # session mode: display only
+        self._feed(98, 'session')  # still session: no alert despite crossing
+        self.app.icon.notify.assert_not_called()
 
     def test_switch_suppresses_reset_notification(self):
         """A drop caused by switching sources must not be read as a quota reset."""

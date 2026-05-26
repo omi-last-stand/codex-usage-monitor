@@ -79,5 +79,7 @@
     "status_refreshing": "रीफ़्रेश हो रहा है...",
     "already_running": "Codex Usage Monitor v{running_version} पहले से चल रहा है।\n\nक्या आप चल रही प्रति को बदलना चाहते हैं?",
     "credits_unlimited": "असीमित",
-    "credits_remaining": "{balance} क्रेडिट शेष"
+    "credits_remaining": "{balance} क्रेडिट शेष",
+    "status_local_snapshot": "लोकल स्नैपशॉट · लाइव API अनुपलब्ध",
+    "replace_failed": "चल रहे इंस्टेंस को बदला नहीं जा सका - यह अभी भी सक्रिय है।"
 }

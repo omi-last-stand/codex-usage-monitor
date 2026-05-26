@@ -251,8 +251,9 @@ function updateStatus(status) {
             nextPollTime: status.next_poll_time,
             refreshing: status.refreshing,
             error: status.error,
+            source: status.source,
         };
-        els.statusSection.classList.toggle('error', !!status.error);
+        els.statusSection.classList.toggle('error', !!status.error || status.source === 'session');
         tickStatusText();
         textTimerId = setInterval(tickStatusText, 1000);
     } else {
@@ -271,6 +272,16 @@ function updateStatus(status) {
  */
 function tickStatusText() {
     if (!statusState.lastSuccessTime) return;
+
+    // Degraded mode: showing a local session snapshot, not live data. The
+    // "Updated Xs ago" timer would reflect the read time, not the data's true
+    // age, so it would be misleading - show a clear local/unavailable indicator.
+    if (statusState.source === 'session') {
+        els.statusText.textContent = translations.status_local_snapshot;
+        els.statusSection.classList.add('error');
+        els.blocks.classList.remove('stale');
+        return;
+    }
 
     const now = Date.now() / 1000;
     const secondsAgo = Math.max(0, Math.floor(now - statusState.lastSuccessTime));

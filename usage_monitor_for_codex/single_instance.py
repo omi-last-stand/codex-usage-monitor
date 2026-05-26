@@ -127,26 +127,33 @@ def _read_holder_info() -> tuple[int | None, str | None]:
     return pid if pid else None, version
 
 
-def _terminate_pid(pid: int) -> None:
+def _terminate_pid(pid: int) -> bool:
     """Terminate a process by PID and wait until it is fully dead.
 
     Uses OpenProcess + TerminateProcess + WaitForSingleObject so the
     process has released all kernel objects (mutexes, handles) before
     this function returns.
+
+    Returns
+    -------
+    bool
+        True only if the process was opened and termination was requested
+        successfully; False if it could not be opened or terminated.
     """
     PROCESS_TERMINATE = 0x0001
     PROCESS_SYNCHRONIZE = 0x00100000
 
     handle = _kernel32.OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, False, pid)
     if not handle:
-        return
+        return False
 
     if not _kernel32.TerminateProcess(handle, 1):
         _kernel32.CloseHandle(handle)
-        return
+        return False
 
     _kernel32.WaitForSingleObject(handle, 5000)
     _kernel32.CloseHandle(handle)
+    return True
 
 
 def ensure_single_instance() -> bool:
@@ -196,7 +203,17 @@ def ensure_single_instance() -> bool:
         _terminate_pid(holder_pid)
     _kernel32.CloseHandle(_mutex_handle)
 
+    # Re-acquire the mutex. If it STILL exists, the previous instance is alive
+    # (its PID was unknown, termination failed, or this was a startup race), so
+    # do NOT start a duplicate - two instances would double-poll and, worse,
+    # double-run any configured reset/threshold commands.
     _mutex_handle = _kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    if ctypes.get_last_error() == _ERROR_ALREADY_EXISTS:
+        _kernel32.CloseHandle(_mutex_handle)
+        _mutex_handle = None
+        ctypes.windll.user32.MessageBoxW(None, T['replace_failed'], title, MB_ICONQUESTION | MB_TOPMOST)
+        return False
+
     _store_holder_info()
     return True
 

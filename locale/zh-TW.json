@@ -79,5 +79,7 @@
     "status_refreshing": "重新整理中...",
     "already_running": "Codex Usage Monitor v{running_version} 已在執行中。\n\n是否要取代正在執行的執行個體？",
     "credits_unlimited": "無限制",
-    "credits_remaining": "剩餘 {balance} 點數"
+    "credits_remaining": "剩餘 {balance} 點數",
+    "status_local_snapshot": "本機快照 · 即時 API 無法使用",
+    "replace_failed": "無法取代執行中的實例——它仍在執行。"
 }

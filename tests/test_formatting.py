@@ -887,6 +887,17 @@ class TestFormatBalance(unittest.TestCase):
     def test_non_numeric_falls_back_to_raw(self):
         self.assertEqual(format_balance('many'), 'many')
 
+    def test_nan_string_no_crash(self):
+        """A 'NaN' balance must not raise (int(nan) would) - show raw text."""
+        self.assertEqual(format_balance('NaN'), 'NaN')
+
+    def test_infinity_string_no_crash(self):
+        """An 'Infinity' balance must not raise (int(inf) would) - show raw text."""
+        self.assertEqual(format_balance('Infinity'), 'Infinity')
+
+    def test_inf_string_no_crash(self):
+        self.assertEqual(format_balance('inf'), 'inf')
+
 
 if __name__ == '__main__':
     unittest.main()

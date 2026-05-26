@@ -79,5 +79,7 @@
     "status_refreshing": "刷新中...",
     "already_running": "Codex Usage Monitor v{running_version} 已在运行中。\n\n是否要替换正在运行的实例？",
     "credits_unlimited": "无限制",
-    "credits_remaining": "剩余 {balance} 积分"
+    "credits_remaining": "剩余 {balance} 积分",
+    "status_local_snapshot": "本地快照 · 实时 API 不可用",
+    "replace_failed": "无法替换正在运行的实例——它仍在运行。"
 }

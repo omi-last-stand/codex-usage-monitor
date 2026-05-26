@@ -439,6 +439,35 @@ class TestSnapshotToDict(unittest.TestCase):
         self.assertEqual(extra['mode'], 'text')
         self.assertTrue(extra['text'])
 
+    def test_credits_shown_on_api_source(self):
+        """Credits ARE shown from a verified live (api) response."""
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''},
+                 'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}, 'source': 'api'}
+        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        self.assertIsNotNone(result['extra'])
+        self.assertEqual(result['extra']['mode'], 'text')
+
+    def test_credits_hidden_on_session_source(self):
+        """Credits (billing-sensitive) are hidden while on unverified local session data."""
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''},
+                 'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}, 'source': 'session'}
+        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        self.assertIsNone(result['extra'])
+
+    def test_status_flags_session_source_as_degraded(self):
+        """Session-sourced data marks the status degraded (so the UI shows a local/stale indicator)."""
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''},
+                 'source': 'session', 'snapshot_at': '2026-05-26T08:00:00Z'}
+        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        self.assertEqual(result['status'].get('source'), 'session')
+        self.assertEqual(result['status'].get('snapshot_at'), '2026-05-26T08:00:00Z')
+
+    def test_status_not_degraded_on_api_source(self):
+        """Live (api) data does not carry the degraded session flag."""
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'source': 'api'}
+        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        self.assertNotIn('source', result['status'])
+
     @patch('usage_monitor_for_codex.popup.format_credits', side_effect=lambda c: f'${c / 100:.2f}')
     def test_extra_usage_fill_clamped(self, _mock_credits):
         """Extra usage fill is clamped to 1.0 when over limit."""

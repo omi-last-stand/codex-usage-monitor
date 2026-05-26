@@ -79,5 +79,7 @@
     "status_refreshing": "Aggiornamento...",
     "already_running": "Codex Usage Monitor v{running_version} è già in esecuzione.\n\nVuoi sostituire l'istanza in esecuzione?",
     "credits_unlimited": "Illimitato",
-    "credits_remaining": "{balance} crediti rimanenti"
+    "credits_remaining": "{balance} crediti rimanenti",
+    "status_local_snapshot": "Snapshot locale · API live non disponibile",
+    "replace_failed": "Impossibile sostituire l'istanza in esecuzione: è ancora attiva."
 }

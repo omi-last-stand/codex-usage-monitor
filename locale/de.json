@@ -79,5 +79,7 @@
     "status_refreshing": "Aktualisiere...",
     "already_running": "Codex Usage Monitor v{running_version} wird bereits ausgeführt.\n\nMöchten Sie die laufende Instanz ersetzen?",
     "credits_unlimited": "Unbegrenzt",
-    "credits_remaining": "{balance} Credits übrig"
+    "credits_remaining": "{balance} Credits übrig",
+    "status_local_snapshot": "Lokaler Snapshot · Live-API nicht verfügbar",
+    "replace_failed": "Die laufende Instanz konnte nicht ersetzt werden - sie ist noch aktiv."
 }

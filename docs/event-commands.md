@@ -205,6 +205,9 @@ Fires when usage crosses a configured alert threshold.
 
 `USAGE_MONITOR_EXTRA_USED` and `USAGE_MONITOR_EXTRA_LIMIT` are only set when `USAGE_MONITOR_VARIANT` is `extra_usage`.
 
+> [!NOTE]
+> The `extra_usage` threshold event, and the `USAGE_MONITOR_EXTRA_USED` / `USAGE_MONITOR_EXTRA_LIMIT` variables, fire only for the legacy used/limit ratio model. They are **not produced for Codex credit balances**: a balance is not a spend amount, so it has no percentage to cross a threshold (see [API Reference](api-reference.md#extra-usage-credits), "Extra usage (credits)").
+
 ### `on_startup_command`
 
 Fires once after the first successful usage update following app start (also after using the **Restart** menu option). Receives the full quota state so the command can decide what to do based on which windows are active. Skipped when the first update fails (auth error, offline, no session data) - retries on the next successful poll.
@@ -218,5 +221,7 @@ Fires once after the first successful usage update following app start (also aft
 | `USAGE_MONITOR_RESETS_AT_SEVEN_DAY` | `2025-01-20T12:00:00Z` | When the 7d window resets, or empty if no window is active |
 | `USAGE_MONITOR_EXTRA_USED` | `$8.20` | Amount spent (only set when extra usage is enabled) |
 | `USAGE_MONITOR_EXTRA_LIMIT` | `$10.00` | Monthly limit (only set when extra usage is enabled) |
+
+As above, `USAGE_MONITOR_EXTRA_USED` / `USAGE_MONITOR_EXTRA_LIMIT` belong to the legacy used/limit ratio model and are **not produced for Codex credit balances** (see [API Reference](api-reference.md#extra-usage-credits)).
 
 Per-quota variables are emitted for every quota field the data returns, following the `USAGE_MONITOR_UTILIZATION_<VARIANT>` / `USAGE_MONITOR_RESETS_AT_<VARIANT>` pattern. An empty `USAGE_MONITOR_RESETS_AT_*` indicates that the quota has no active window (either never used, or the previous window has expired).

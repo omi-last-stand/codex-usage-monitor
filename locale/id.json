@@ -79,5 +79,7 @@
     "status_refreshing": "Memperbarui...",
     "already_running": "Codex Usage Monitor v{running_version} sudah berjalan.\n\nApakah Anda ingin mengganti instans yang sedang berjalan?",
     "credits_unlimited": "Tak terbatas",
-    "credits_remaining": "Sisa {balance} kredit"
+    "credits_remaining": "Sisa {balance} kredit",
+    "status_local_snapshot": "Snapshot lokal · API langsung tidak tersedia",
+    "replace_failed": "Tidak dapat mengganti instance yang berjalan - masih aktif."
 }

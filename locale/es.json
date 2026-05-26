@@ -79,5 +79,7 @@
     "status_refreshing": "Actualizando...",
     "already_running": "Codex Usage Monitor v{running_version} ya se está ejecutando.\n\n¿Desea reemplazar la instancia en ejecución?",
     "credits_unlimited": "Ilimitado",
-    "credits_remaining": "{balance} créditos restantes"
+    "credits_remaining": "{balance} créditos restantes",
+    "status_local_snapshot": "Instantánea local · API en vivo no disponible",
+    "replace_failed": "No se pudo reemplazar la instancia en ejecución: sigue activa."
 }

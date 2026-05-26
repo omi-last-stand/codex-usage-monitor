@@ -8,6 +8,7 @@ elapsed period percentages, credit amounts, status lines, and tooltip text.
 from __future__ import annotations
 
 import locale as _locale
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -340,6 +341,9 @@ def format_balance(balance: Any) -> str:
     try:
         amount = float(str(balance).replace(',', '').strip())
     except (TypeError, ValueError):
+        return str(balance)
+    if not math.isfinite(amount):
+        # NaN / Infinity: never call int() on it (raises); show the raw text.
         return str(balance)
     if amount == int(amount):
         return f'{int(amount):,}'

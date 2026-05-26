@@ -627,6 +627,39 @@ class TestSessionFallback(unittest.TestCase):
         self.assertEqual(result['source'], 'session')
         self.assertEqual(result['five_hour']['utilization'], 4.0)
 
+    @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'session')
+    def test_selects_by_snapshot_timestamp_not_mtime(self):
+        """The newest *record timestamp* wins, even if an older snapshot's file
+        has a newer mtime (touch / sync / restore must not promote stale data)."""
+        import os
+        import time
+        with TemporaryDirectory() as tmp:
+            sessions = Path(tmp)
+            day = sessions / '2026' / '05' / '26'
+            day.mkdir(parents=True)
+
+            def write(name, ts, used_percent):
+                rl = {'primary': {'used_percent': used_percent, 'window_minutes': 300, 'resets_at': 1779754106}}
+                rec = {'timestamp': ts, 'type': 'event_msg',
+                       'payload': {'type': 'token_count', 'info': {'rate_limits': rl}}}
+                p = day / f'rollout-{name}.jsonl'
+                p.write_text(json.dumps(rec) + '\n', encoding='utf-8')
+                return p
+
+            newer = write('A', '2026-05-26T10:00:00Z', 10)  # newer timestamp, low usage
+            older = write('B', '2026-05-26T08:00:00Z', 90)  # older timestamp, high usage
+            # The trap: give the OLDER-content file the NEWER mtime.
+            now = time.time()
+            os.utime(newer, (now - 100, now - 100))
+            os.utime(older, (now, now))
+
+            with patch('usage_monitor_for_codex.codex_api.CODEX_SESSIONS_DIR', sessions):
+                result = fetch_usage()
+
+        self.assertEqual(result['five_hour']['utilization'], 10.0)  # newer-timestamp snapshot
+        self.assertEqual(result['source'], 'session')
+        self.assertIn('snapshot_at', result)
+
     @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'auto')
     @patch('usage_monitor_for_codex.codex_api.requests.get', side_effect=requests.ConnectionError())
     @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -790,6 +823,16 @@ class TestCreditsTransform(unittest.TestCase):
 
     def test_non_dict_credits_no_extra(self):
         self.assertIsNone(self._extra('nope'))
+
+    def test_nan_balance_no_extra(self):
+        """A non-finite balance string is rejected (would crash format_balance)."""
+        self.assertIsNone(self._extra({'has_credits': True, 'unlimited': False, 'balance': 'NaN'}))
+
+    def test_infinity_balance_no_extra(self):
+        self.assertIsNone(self._extra({'has_credits': True, 'unlimited': False, 'balance': 'Infinity'}))
+
+    def test_float_inf_balance_no_extra(self):
+        self.assertIsNone(self._extra({'has_credits': True, 'unlimited': False, 'balance': float('inf')}))
 
 
 if __name__ == '__main__':

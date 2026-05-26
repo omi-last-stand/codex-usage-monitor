@@ -239,7 +239,10 @@ def _snapshot_to_dict(
     # The legacy used/monthly_limit ratio bar is kept as a fallback for any
     # future payload that carries a spend limit.
     extra = None
-    if snap.usage:
+    # Hide credits while on local session-fallback data: a balance is
+    # billing-sensitive and the snapshot is unverified / possibly stale or from
+    # another account, so only show it from a verified live (api) response.
+    if snap.usage and snap.usage.get('source') != 'session':
         extra_data = snap.usage.get('extra_usage')
         if extra_data and extra_data.get('is_enabled'):
             if extra_data.get('unlimited'):
@@ -277,6 +280,13 @@ def _snapshot_to_dict(
             'refreshing': snap.refreshing,
             'error': snap.last_error[:120] if snap.last_error else None,
         }
+        # Degraded mode: the data is a local session snapshot (the live API
+        # was unavailable), so the "Updated Xs ago" timer would be misleading -
+        # flag it so the UI shows a clear local/stale indicator instead.
+        if snap.usage.get('source') == 'session':
+            status['source'] = 'session'
+            status['snapshot_at'] = snap.usage.get('snapshot_at')
+            status['api_error'] = snap.usage.get('api_error')
 
     # Layout - one flat, ordered list of every shown block (account, usage bars,
     # extra usage, versions, status), driving block order and 3-state in the widget.
@@ -323,6 +333,7 @@ def _init_config(snap: CacheSnapshot, next_poll_time: float | None = None, *, al
             'claude_code': T['claude_code'], 'changelog': T['changelog'],
             'status_updated_s': T['status_updated_s'], 'status_updated': T['status_updated'],
             'status_next_update': T['status_next_update'], 'status_refreshing': T['status_refreshing'],
+            'status_local_snapshot': T['status_local_snapshot'],
             'duration_hm': T['duration_hm'], 'duration_m': T['duration_m'], 'duration_s': T['duration_s'],
             'menu_always_on_top': T['always_on_top'], 'menu_settings': T['settings_title'],
             'menu_about': T['about_title'], 'menu_quit': T['quit'],

@@ -79,5 +79,7 @@
     "status_refreshing": "Оновлення...",
     "already_running": "Codex Usage Monitor v{running_version} вже запущено.\n\nБажаєте замінити запущений екземпляр?",
     "credits_unlimited": "Необмежено",
-    "credits_remaining": "Залишок: {balance} кредитів"
+    "credits_remaining": "Залишок: {balance} кредитів",
+    "status_local_snapshot": "Локальний знімок · Live API недоступний",
+    "replace_failed": "Не вдалося замінити запущений екземпляр - він досі активний."
 }

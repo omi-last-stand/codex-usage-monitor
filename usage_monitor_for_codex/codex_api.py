@@ -225,13 +225,16 @@ def _fetch_usage_session() -> dict[str, Any] | None:
     most recent snapshot found, transformed into the internal model.
     Returns ``None`` when no snapshot is available.
     """
-    rate_limits = _latest_session_rate_limits()
-    if not rate_limits:
+    found = _latest_session_rate_limits()
+    if not found:
         return None
+    snapshot_at, rate_limits = found
     result = transform_rate_limits(rate_limits)
     if not _has_quota(result):
         return None
     result['source'] = 'session'
+    if snapshot_at:
+        result['snapshot_at'] = snapshot_at
     return result
 
 
@@ -382,6 +385,13 @@ def _credits_to_extra_usage(credits: Any) -> dict[str, Any] | None:
     balance = credits.get('balance')
     if balance is None or balance == '' or isinstance(balance, bool) or not isinstance(balance, (str, int, float)):
         return None
+    # Reject non-finite numbers (NaN / Infinity), including numeric strings, so
+    # they never reach format_balance() / int() and crash the popup update loop.
+    try:
+        if not math.isfinite(float(str(balance).replace(',', '').strip())):
+            return None
+    except (TypeError, ValueError):
+        pass  # a genuinely non-numeric string balance is left as-is for display
 
     return {'is_enabled': True, 'unlimited': False, 'balance': balance}
 
@@ -399,13 +409,14 @@ def _has_quota(data: dict[str, Any]) -> bool:
 # Session-file fallback
 # ---------------------------------------------------------------------------
 
-def _latest_session_rate_limits(max_files: int = 40) -> dict[str, Any] | None:
-    """Return the most recent ``rate_limits`` snapshot from session files.
+def _latest_session_rate_limits(max_files: int = 40) -> tuple[str | None, dict[str, Any]] | None:
+    """Return ``(snapshot_at, rate_limits)`` from the freshest session record.
 
-    Scans the newest ``rollout-*.jsonl`` files (by modification time) and
-    returns the last snapshot found in the newest file that contains one.
-    Only lines mentioning ``rate_limits`` are JSON-parsed, so large
-    transcripts are skipped cheaply.
+    File mtime is only a cheap prefilter for *which* recent ``rollout-*.jsonl``
+    files to scan; the chosen snapshot is the one with the newest *record*
+    timestamp, so a stale file that was merely touched / synced / restored
+    cannot win over genuinely fresher data.  Only lines mentioning
+    ``rate_limits`` are JSON-parsed.  Returns ``None`` when none is found.
     """
     if not CODEX_SESSIONS_DIR.is_dir():
         return None
@@ -419,16 +430,33 @@ def _latest_session_rate_limits(max_files: int = 40) -> dict[str, Any] | None:
     except OSError:
         return None
 
+    best: tuple[datetime, str, dict[str, Any]] | None = None
+    fallback: tuple[str | None, dict[str, Any]] | None = None
     for path in files:
-        snapshot = _scan_file_for_rate_limits(path)
-        if snapshot:
-            return snapshot
-    return None
+        ts_str, snapshot = _scan_file_for_rate_limits(path)
+        if snapshot is None:
+            continue
+        ts = _parse_timestamp(ts_str)
+        if ts is not None:
+            if best is None or ts > best[0]:
+                best = (ts, ts_str, snapshot)
+        elif fallback is None:
+            # mtime-newest snapshot that lacks a parseable timestamp
+            fallback = (ts_str, snapshot)
+
+    if best is not None:
+        return (best[1], best[2])
+    return fallback
 
 
-def _scan_file_for_rate_limits(path: Path) -> dict[str, Any] | None:
-    """Return the last ``rate_limits`` snapshot in a rollout file, or None."""
-    latest: dict[str, Any] | None = None
+def _scan_file_for_rate_limits(path: Path) -> tuple[str | None, dict[str, Any] | None]:
+    """Return ``(timestamp, snapshot)`` for the last rate_limits record in a file.
+
+    *timestamp* is the record's ISO ``timestamp`` (or ``None``).  Returns
+    ``(None, None)`` when the file has no usable snapshot.
+    """
+    latest_ts: str | None = None
+    latest_snapshot: dict[str, Any] | None = None
     try:
         # errors='replace': a rollout file may be mid-write, so a truncated
         # multibyte sequence must not raise UnicodeDecodeError and crash the
@@ -443,10 +471,11 @@ def _scan_file_for_rate_limits(path: Path) -> dict[str, Any] | None:
                     continue
                 snapshot = _extract_record_rate_limits(record)
                 if snapshot:
-                    latest = snapshot
+                    latest_snapshot = snapshot
+                    latest_ts = record.get('timestamp') if isinstance(record, dict) else None
     except (OSError, UnicodeDecodeError):
-        return None
-    return latest
+        return (None, None)
+    return (latest_ts, latest_snapshot)
 
 
 def _extract_record_rate_limits(record: Any) -> dict[str, Any] | None:
@@ -463,6 +492,16 @@ def _extract_record_rate_limits(record: Any) -> dict[str, Any] | None:
     if isinstance(record.get('rate_limits'), dict):
         return record['rate_limits']
     return None
+
+
+def _parse_timestamp(ts_str: Any) -> datetime | None:
+    """Parse a session record's ISO ``timestamp`` into a datetime, or None."""
+    if not ts_str:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts_str).replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return None
 
 
 def _locate_rate_limits(payload: Any) -> dict[str, Any] | None:
