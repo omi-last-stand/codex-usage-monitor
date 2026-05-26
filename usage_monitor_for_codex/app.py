@@ -456,6 +456,40 @@ class UsageMonitorForCodex:
             self._run_reset_command(key, pct, prev, data=result.data, entry=entry_payload)
             self._idle_reset_pending = False
 
+        # Phase 4: retire EVERY window whose period has ENDED, independent of whether
+        # its reset command fired. Disposal of an ended period's trusted state must be
+        # decoupled from on_reset_command firing: a window that expired at low usage,
+        # or whose reset was suppressed because another quota was blocking, has still
+        # ended its period. A window's period is over once its RETAINED deadline has
+        # passed; the new period's first observed value must then be a FRESH baseline
+        # (a notification may show, but on_threshold_command must NOT fire - it is not
+        # an in-period crossing), exactly like a window first appearing. This covers
+        # both a window that VANISHED from the response and one PRESENT again under a
+        # NEW deadline (the new period is already in use). Reset detection above
+        # already consumed the old value; firing expired-absent windows were purged in
+        # Phase 2; the end-of-update merge re-records a present window's new-period
+        # baseline and deadline.
+        for key in list(self._prev_entries):
+            entry = self._prev_entries.get(key)
+            resets_at = entry.get('resets_at') if isinstance(entry, dict) else None
+            if not resets_at:
+                continue
+            try:
+                if datetime.fromisoformat(resets_at) > now:
+                    continue  # period still active - keep the baseline
+            except (ValueError, TypeError):
+                continue
+            current = result.data.get(key)
+            if (isinstance(current, dict) and current.get('utilization') is not None
+                    and current.get('resets_at') == resets_at):
+                # The same already-passed deadline is still reported (the server has
+                # not advanced the period yet): not a rollover, keep the baseline so
+                # the lingering value is not misread as a fresh period.
+                continue
+            self._prev_utilization.pop(key, None)
+            self._prev_entries.pop(key, None)
+            self._notified_thresholds.pop(key, None)
+
         self._check_threshold_alerts(result.data)
 
         # Adaptive polling: speed up when the primary quota's usage is increasing

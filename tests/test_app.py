@@ -1719,6 +1719,108 @@ class TestExpiredWindowReset(unittest.TestCase):
         self.assertNotIn('seven_day', self.app._prev_utilization)
 
 
+class TestPeriodRolloverThresholdGuard(unittest.TestCase):
+    """When a quota window's PERIOD ends (its retained deadline passes), the old-period
+    baseline is retired so the NEW period's first high observation is a FRESH baseline:
+    a notification may show, but on_threshold_command must NOT fire (it is not an
+    in-period crossing). Disposal of the ended period is decoupled from on_reset_command
+    firing - a low-usage or reset-blocked expiry still ends the period (review 2124)."""
+
+    PAST = '2020-01-01T00:00:00+00:00'
+    FUTURE = '2099-01-01T00:00:00+00:00'
+
+    def setUp(self):
+        self.app = _make_app(thresholds=[80, 95])
+        self.app._first_update_done = True
+        self._cmd_patch = patch('usage_monitor_for_codex.app.run_event_command')
+        self._cmd = self._cmd_patch.start()
+        self._th_patch = patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['threshold.bat'])
+        self._th_patch.start()
+        self._rc_patch = patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+        self._rc_patch.start()
+        self._tt_patch = patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+        self._tt_patch.start()
+        self._icon_patch = patch('usage_monitor_for_codex.app.load_tray_icon')
+        self._icon_patch.start()
+
+    def tearDown(self):
+        for p in (self._icon_patch, self._tt_patch, self._rc_patch, self._th_patch, self._cmd_patch):
+            p.stop()
+        _cleanup(self.app)
+
+    def _feed(self, data):
+        self.app.cache = MagicMock()
+        self.app.cache.update.return_value = UpdateResult(data=data)
+        self.app.update()
+
+    def _threshold_calls(self, variant='five_hour'):
+        return [
+            c for c in self._cmd.call_args_list
+            if c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold'
+            and c[0][1].get('USAGE_MONITOR_VARIANT') == variant
+        ]
+
+    def test_credits_only_interlude_new_period_high_no_command(self):
+        """five_hour@10 (deadline passed) -> Credits-only (window vanishes) -> new
+        five_hour@96: the old period is retired on the Credits-only response, so the
+        new 96% is a fresh baseline and fires no threshold command (review 2124 repro 1)."""
+        self._feed({'five_hour': {'utilization': 10.0, 'resets_at': self.PAST}})
+        self._feed({'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}})
+        self.assertNotIn('five_hour', self.app._prev_utilization)  # old period purged
+        self._cmd.reset_mock()
+        self._feed({'five_hour': {'utilization': 96.0, 'resets_at': self.FUTURE}})
+        self.assertEqual(self._threshold_calls(), [])
+
+    def test_seven_day_only_interlude_new_period_high_no_command(self):
+        """five_hour@10 (deadline passed) -> seven_day-only (five_hour vanishes) -> new
+        five_hour@96: no threshold command on the new period's first value."""
+        self._feed({'five_hour': {'utilization': 10.0, 'resets_at': self.PAST}})
+        self._feed({'seven_day': {'utilization': 12.0, 'resets_at': self.FUTURE}})
+        self.assertNotIn('five_hour', self.app._prev_utilization)
+        self._cmd.reset_mock()
+        self._feed({
+            'five_hour': {'utilization': 96.0, 'resets_at': self.FUTURE},
+            'seven_day': {'utilization': 12.0, 'resets_at': self.FUTURE},
+        })
+        self.assertEqual(self._threshold_calls(), [])
+
+    def test_consecutive_new_period_high_no_command(self):
+        """five_hour@10 (deadline passed) -> same window present at 96 with a NEW future
+        deadline (a new period already in use, no intervening absence): the retained
+        deadline passed and resets_at advanced, so it is a period change - the new 96%
+        is a fresh baseline and fires no threshold command (review 2124 repro 2)."""
+        self._feed({'five_hour': {'utilization': 10.0, 'resets_at': self.PAST}})
+        self._cmd.reset_mock()
+        self._feed({'five_hour': {'utilization': 96.0, 'resets_at': self.FUTURE}})
+        self.assertEqual(self._threshold_calls(), [])
+        # The new period is now the baseline (recorded by the end-of-update merge).
+        self.assertEqual(self.app._prev_utilization.get('five_hour'), 96.0)
+        self.assertEqual(self.app._prev_entries['five_hour']['resets_at'], self.FUTURE)
+
+    def test_blocked_reset_still_retires_old_period(self):
+        """five_hour@97 (deadline passed) vanishes while seven_day@99 blocks its reset
+        command: the reset is correctly suppressed, but the ended five_hour period is
+        STILL retired (disposal decoupled from firing), so a later new five_hour@96
+        fires no threshold command (review 2124 supplement)."""
+        self._feed({
+            'five_hour': {'utilization': 97.0, 'resets_at': self.PAST},
+            'seven_day': {'utilization': 99.0, 'resets_at': self.FUTURE},
+        })
+        self._feed({'seven_day': {'utilization': 99.0, 'resets_at': self.FUTURE}})
+        self.assertNotIn('five_hour', self.app._prev_utilization)  # retired despite blocked reset
+        reset_5h = [
+            c for c in self._cmd.call_args_list
+            if c[0][1].get('USAGE_MONITOR_EVENT') == 'reset' and c[0][1].get('USAGE_MONITOR_VARIANT') == 'five_hour'
+        ]
+        self.assertEqual(reset_5h, [])  # reset command suppressed by the blocking seven_day
+        self._cmd.reset_mock()
+        self._feed({
+            'five_hour': {'utilization': 96.0, 'resets_at': self.FUTURE},
+            'seven_day': {'utilization': 99.0, 'resets_at': self.FUTURE},
+        })
+        self.assertEqual(self._threshold_calls('five_hour'), [])
+
+
 class TestThresholdCommand(unittest.TestCase):
     """Tests for on_threshold_command execution during threshold alerts."""
 
