@@ -387,8 +387,9 @@ def _window_to_key(window_minutes: Any, fallback: str) -> str:
 def _iso_from_window(window: dict[str, Any]) -> str:
     """Return an ISO-8601 reset timestamp from a rate-limit window.
 
-    Accepts an absolute ``resets_at`` (epoch seconds, or milliseconds when
-    large) or a relative ``resets_in_seconds`` / ``reset_after_seconds``.
+    Accepts an absolute ``resets_at`` / ``reset_at`` (epoch seconds, or
+    milliseconds when large) or a relative ``resets_in_seconds`` /
+    ``reset_after_seconds`` / ``resets_in``.
     """
     for abs_key in ('resets_at', 'reset_at'):
         absolute = window.get(abs_key)
