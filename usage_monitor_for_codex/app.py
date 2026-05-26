@@ -61,13 +61,14 @@ class UsageMonitorForCodex:
         self._prev_source: str | None = None
         self._first_update_done = False
         self._notified_thresholds: dict[str, float] = {}
-        # After a verified account switch, the first verified sample of the NEW
-        # account is a fresh baseline, not an OBSERVED crossing - so suppress
-        # on_threshold_command for it (exactly as at app startup): merely switching
-        # to an already-high account must not fire the command. Cleared once that
-        # first verified sample establishes the baseline; a later observed crossing
-        # (B@low -> B@high) then fires normally.
-        self._threshold_baseline_pending = False
+        # Best-known per-window ENTRY view (full window dicts, carrying resets_at) -
+        # the entry-level companion to _prev_utilization: identical keyset and
+        # lifecycle (reset on a verified account switch, merged from each verified
+        # live sample). Reset SCHEDULING reads this, not the raw latest response, so
+        # a partial or credits-only verified response that omits a window cannot
+        # erase that window's known reset deadline (which the idle/lock
+        # on_reset_command wake-up depends on).
+        self._prev_entries: dict[str, dict[str, Any]] = {}
 
         # Adaptive polling state
         self._fast_polls_remaining = 0
@@ -302,13 +303,14 @@ class UsageMonitorForCodex:
         # ensure_profile() re-fetches when EITHER the access token changes (a `codex
         # login`) OR the account changes (a same-token workspace/account switch) -
         # either yields a new account UUID here. On a switch, reset the OLD account's
-        # trusted event state and mark the next verified sample a fresh BASELINE (no
-        # threshold command): merely switching to an already-high account is existing
-        # state, not an OBSERVED crossing. Do NOT return - the switch sample itself,
-        # if it is verified for the new account, establishes that account's baseline
-        # below (so a later observed B-low -> B-high crossing still fires); a
-        # mid-switch mismatch / unverified sample instead returns at the identity
-        # gate, leaving the baseline to the first following verified sample.
+        # trusted event state. The new account's windows then have no prior value, so
+        # the per-window baseline guard in _check_threshold_alerts treats each
+        # window's FIRST observed value as a baseline (no command) - merely switching
+        # to an already-high account is existing state, not an OBSERVED crossing. Do
+        # NOT return: the switch sample itself, if verified for the new account,
+        # records its windows' baselines below (so a later observed B-low -> B-high
+        # crossing still fires); a mid-switch mismatch / unverified sample instead
+        # returns at the identity gate.
         self.cache.ensure_profile()
         current_profile = self.cache.profile
         current_account_uuid = current_profile.get('account', {}).get('uuid') if isinstance(current_profile, dict) else None
@@ -317,8 +319,8 @@ class UsageMonitorForCodex:
             message = T['notify_account_switched'].format(email=email) if email else T['notify_account_switched_title']
             self._notify_or_defer('account_switched', message, T['notify_account_switched_title'])
             self._prev_utilization = {}
+            self._prev_entries = {}
             self._notified_thresholds = {}
-            self._threshold_baseline_pending = True
         # Preserve the last known account UUID across a transient profile-fetch
         # failure (current_account_uuid is None). Overwriting it with None here would
         # lose the prior identity, so a genuine switch A -> B whose first B-profile
@@ -348,6 +350,14 @@ class UsageMonitorForCodex:
         # verified live sample's values (every untrusted sample returned above), so
         # this compares verified-to-verified for the same account. While idle/locked,
         # notifications are deferred until the user returns (lock-screen privacy).
+        # "Is another quota still blocking?" must consider EVERY window's best-known
+        # current utilization, not only the windows in this (possibly partial)
+        # response. A window omitted from this response keeps its last verified value
+        # in _prev_utilization; if that was blocking (>=99) a reset for a different
+        # window must still be suppressed. Overlay the current response on the
+        # accumulated last-known state. (For normal Codex responses, which carry all
+        # windows, this equals quota_fields, so behavior is unchanged.)
+        effective_util = {**self._prev_utilization, **quota_fields}
         for key, pct in quota_fields.items():
             prev = self._prev_utilization.get(key)
             if prev is None:
@@ -359,7 +369,7 @@ class UsageMonitorForCodex:
 
             _, unit, _ = parsed
             reset_threshold = 95 if unit == 'hour' else 98
-            any_blocking = any(other_pct >= 99 for other_key, other_pct in quota_fields.items() if other_key != key)
+            any_blocking = any(other_pct >= 99 for other_key, other_pct in effective_util.items() if other_key != key)
 
             if prev > reset_threshold and pct < prev and not any_blocking:
                 self._notify_or_defer('reset', T['notify_reset'], T['notify_reset_title'])
@@ -367,10 +377,6 @@ class UsageMonitorForCodex:
                 self._idle_reset_pending = False
 
         self._check_threshold_alerts(result.data)
-        # This verified sample has now established the post-switch baseline (its
-        # notified-threshold levels are recorded above without firing a command);
-        # subsequent samples may fire on a genuinely observed crossing.
-        self._threshold_baseline_pending = False
 
         # Adaptive polling: speed up when the primary quota's usage is increasing
         watch_key = TOOLTIP_FIELDS[0] if TOOLTIP_FIELDS else 'five_hour'
@@ -381,13 +387,20 @@ class UsageMonitorForCodex:
         elif self._fast_polls_remaining > 0:
             self._fast_polls_remaining -= 1
 
-        # Keep the last verified quota baseline across a quota-less verified response
-        # (e.g. a credits-only Pro payload with no five_hour/seven_day window): an
-        # empty quota set has nothing to reset-detect and must not clobber a real
-        # prior baseline, or a later genuine reset would be lost. A genuine account
-        # switch already reset the baseline above.
+        # MERGE (not replace) the per-window baseline, so each window's last verified
+        # value PERSISTS across responses that omit it. _prev_utilization is the
+        # accumulated last-known utilization per quota window for the current account
+        # (reset on an account switch). Merging is what makes both the reset check
+        # (prev value for a returning window) and the per-window threshold guard
+        # (a window stays "observed" once seen) survive a partial or credits-only
+        # response. A quota-less response (e.g. credits-only Pro) merges nothing, so
+        # it neither clobbers nor loses a real prior baseline.
         if quota_fields:
-            self._prev_utilization = quota_fields
+            self._prev_utilization.update(quota_fields)
+            # Retain each present window's full entry (resets_at included), keyed
+            # like _prev_utilization, so a later partial / credits-only response that
+            # omits the window still exposes its reset deadline to scheduling.
+            self._prev_entries.update({key: result.data[key] for key in quota_fields})
 
         # Fire the one-time startup command on the first successful update, but
         # only when this live sample's account matches the displayed profile -
@@ -477,7 +490,18 @@ class UsageMonitorForCodex:
                 label = popup_label(variant_key)
                 message = T['notify_threshold_generic'].format(label=label, pct=f'{pct:.0f}')
                 self._notify_or_defer(f'threshold_{variant_key}', message, title)
-                self._run_threshold_command(variant_key, pct, highest_exceeded, entry, title, message)
+                # Per-window baseline guard: run the command only on an OBSERVED
+                # crossing - this window must have a verified prior value for the
+                # current account (i.e. it is already in _prev_utilization, which
+                # still holds the previous sample's windows here; it is reset on an
+                # account switch and updated only at the end of update()). A window's
+                # FIRST observed value - app startup, the first sample after an
+                # account switch, or a window that only now appears in the response
+                # (e.g. five_hour arriving after a Credits-only or partial switch
+                # sample) - is existing state, not a crossing: it seeds the baseline
+                # and shows a notification, but must not fire on_threshold_command.
+                if variant_key in self._prev_utilization:
+                    self._run_threshold_command(variant_key, pct, highest_exceeded, entry, title, message)
                 self._notified_thresholds[variant_key] = highest_exceeded
             elif highest_exceeded < last_notified:
                 self._notified_thresholds[variant_key] = highest_exceeded
@@ -566,8 +590,19 @@ class UsageMonitorForCodex:
         if not ON_RESET_COMMAND:
             return
 
-        pct_5h = (data.get('five_hour') or {}).get('utilization', 0) or 0
-        pct_7d = (data.get('seven_day') or {}).get('utilization', 0) or 0
+        # Export every window's BEST-KNOWN utilization: the value from this response
+        # if present, else the retained last-known value from _prev_utilization (this
+        # response may be partial - e.g. the API omitted `secondary`). Otherwise a
+        # window merely absent from this response would be exported as 0 and could
+        # mislead a user command that gates on both quota values.
+        def _effective_pct(field: str) -> float:
+            window = data.get(field)
+            if isinstance(window, dict) and window.get('utilization') is not None:
+                return window.get('utilization') or 0
+            return self._prev_utilization.get(field, 0) or 0
+
+        pct_5h = _effective_pct('five_hour')
+        pct_7d = _effective_pct('seven_day')
         run_event_command(ON_RESET_COMMAND, {
             'USAGE_MONITOR_EVENT': 'reset',
             'USAGE_MONITOR_VARIANT': variant,
@@ -587,14 +622,15 @@ class UsageMonitorForCodex:
     ) -> None:
         """Run the user-configured threshold command if set.
 
-        Skipped on the first update (before ``_first_update_done`` is set) and on
-        the first verified sample after an account switch
-        (``_threshold_baseline_pending``) so that already-exceeded thresholds at app
-        startup OR at a freshly-switched-to account do not trigger commands - those
-        are existing *state*, not an OBSERVED crossing.  Notifications still fire -
-        commands react to *events*, not *state*.
+        Skipped on the first update (before ``_first_update_done`` is set) so that
+        an already-exceeded threshold at app startup does not trigger a command.
+        The caller (:meth:`_check_threshold_alerts`) additionally fires this only for
+        a window with a verified prior value (an OBSERVED crossing), so a window's
+        first observed value - including after an account switch or when a window
+        first appears in the response - never triggers a command.  Notifications
+        still fire - commands react to *events*, not *state*.
         """
-        if not ON_THRESHOLD_COMMAND or not self._first_update_done or self._threshold_baseline_pending:
+        if not ON_THRESHOLD_COMMAND or not self._first_update_done:
             return
 
         env_vars = {
@@ -616,10 +652,21 @@ class UsageMonitorForCodex:
     # Polling
 
     def _seconds_until_next_reset(self) -> float | None:
-        """Return seconds until the earliest upcoming quota reset, or None."""
+        """Return seconds until the earliest upcoming quota reset, or None.
+
+        Reads the BEST-KNOWN per-window view - the retained verified entries
+        (_prev_entries, which survive a partial / credits-only response that omits a
+        window) overlaid on the latest raw response - rather than the latest raw
+        response alone. A verified sample writes both, so they agree; for a partial,
+        credits-only, session, or error response the retained verified deadline is
+        preserved (and a trusted entry wins over any same-window value in the raw
+        response), so an upcoming reset that the idle/lock on_reset_command wake-up
+        depends on is never discarded just because one response omitted that window.
+        """
         now = datetime.now(timezone.utc)
         earliest = None
-        for key, entry in self._last_response.items():
+        windows = {**self._last_response, **self._prev_entries}
+        for key, entry in windows.items():
             if not isinstance(entry, dict) or not entry.get('resets_at'):
                 continue
             try:

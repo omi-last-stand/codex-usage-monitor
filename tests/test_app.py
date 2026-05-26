@@ -1020,6 +1020,86 @@ class TestSecondsUntilNextReset(unittest.TestCase):
 
         self.assertIsNone(self.app._seconds_until_next_reset())
 
+    # --- Partial / credits-only response must not erase a known deadline (1919) ---
+
+    @patch('usage_monitor_for_codex.app.datetime')
+    def test_retained_entry_survives_response_omitting_window(self, mock_dt):
+        """A retained verified window deadline (_prev_entries) is still returned when
+        the latest raw response omits that window (e.g. a credits-only response). The
+        scheduler must not lose the deadline the idle on_reset_command wake depends
+        on just because one response did not carry that window (review 1919)."""
+        now = datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+        mock_dt.now.return_value = now
+        mock_dt.fromisoformat = datetime.fromisoformat
+
+        # Latest raw response is credits-only - no quota windows at all...
+        self.app._last_response = {'extra_usage': {'is_enabled': True, 'balance': 1250}, 'source': 'api'}
+        # ...but a prior verified sample retained five_hour's reset deadline.
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': '2025-01-15T12:30:00+00:00'}}
+
+        result = self.app._seconds_until_next_reset()
+        assert result is not None
+        self.assertAlmostEqual(result, 1800.0, places=0)  # 30 minutes to five_hour reset
+
+    def test_partial_response_through_update_keeps_reset_deadline(self):
+        """End-to-end: a verified full sample records both windows' deadlines; a
+        following verified credits-only sample (no quota windows) must not erase the
+        five_hour deadline, so the idle on_reset_command wake still fires on time
+        (review 1919, 5th blocker - reset scheduling rooted at the _last_response
+        wholesale replace)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={
+                'five_hour': {'utilization': 97.0, 'resets_at': '2025-01-15T12:30:00+00:00'},
+                'seven_day': {'utilization': 10.0, 'resets_at': '2025-01-18T00:00:00+00:00'},
+                'source': 'api', 'account_id': 'acct-A',
+            }),
+            UpdateResult(data={
+                'extra_usage': {'is_enabled': True, 'balance': 1250},
+                'source': 'api', 'account_id': 'acct-A',
+            }),  # verified credits-only: omits both quota windows
+        ]
+        self.app.update()  # full verified sample -> records both deadlines
+        self.app.update()  # credits-only verified sample -> _last_response loses windows
+
+        # The retained verified entry survives; the raw latest response does not carry it.
+        self.assertIn('five_hour', self.app._prev_entries)
+        self.assertEqual(self.app._prev_entries['five_hour']['resets_at'], '2025-01-15T12:30:00+00:00')
+        self.assertNotIn('five_hour', self.app._last_response)
+
+        with patch('usage_monitor_for_codex.app.datetime') as mock_dt:
+            mock_dt.now.return_value = datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
+            mock_dt.fromisoformat = datetime.fromisoformat
+            result = self.app._seconds_until_next_reset()
+        assert result is not None
+        self.assertAlmostEqual(result, 1800.0, places=0)  # still the five_hour deadline
+
+    def test_account_switch_clears_retained_entries(self):
+        """A verified account switch clears _prev_entries so a window present only in
+        account A's responses does not leak its stale reset deadline into account B's
+        scheduling (review 1919 - same lifecycle as _prev_utilization)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={
+                'five_hour': {'utilization': 50.0, 'resets_at': '2025-01-15T12:30:00+00:00'},
+                'seven_day': {'utilization': 30.0, 'resets_at': '2025-01-18T00:00:00+00:00'},
+                'source': 'api', 'account_id': 'acct-A',
+            }),
+            UpdateResult(data={
+                'five_hour': {'utilization': 20.0, 'resets_at': '2025-02-01T00:00:00+00:00'},
+                'source': 'api', 'account_id': 'acct-B',
+            }),  # B's first sample omits seven_day
+        ]
+        self.app.update()  # A: both windows retained
+        self.assertIn('seven_day', self.app._prev_entries)
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}
+        self.app.update()  # switch to B (A's event state, including entries, is cleared)
+        # A's seven_day deadline must not survive the switch into B's scheduling.
+        self.assertNotIn('seven_day', self.app._prev_entries)
+        self.assertEqual(self.app._prev_entries['five_hour']['resets_at'], '2025-02-01T00:00:00+00:00')
+
 
 # ---------------------------------------------------------------------------
 # Poll interval reset alignment
@@ -2840,6 +2920,137 @@ class TestSourceSwitchGuard(unittest.TestCase):
         threshold_calls = [c for c in self._cmd.call_args_list if c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold']
         self.assertEqual(len(threshold_calls), 1)
         self.assertEqual(threshold_calls[0][0][1]['USAGE_MONITOR_THRESHOLD'], '95')
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_credits_only_switch_then_quota_high_no_command(self):
+        """A Credits-only verified switch response (no quota windows) must not consume
+        the per-window baseline guard: when five_hour first appears at 96% it is a
+        FIRST observation for the new account, so no command fires (review 1919
+        repro 1 - the single-flag design wrongly let this through)."""
+        self.app.cache = MagicMock()
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}, 'source': 'api', 'account_id': 'acct-B'}),  # credits-only switch
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # first B quota window
+        ]
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.update()  # A five_hour@10
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}  # codex login to B
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # B credits-only switch -> reset, NO quota baseline recorded
+        self.app.update()  # B five_hour@96 -> first observation -> no command
+        self.assertFalse(any(c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold' for c in self._cmd.call_args_list))
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_partial_quota_switch_then_other_window_high_no_command(self):
+        """A switch response carrying only seven_day must not let an unobserved
+        five_hour fire: five_hour's first appearance at 96% is a first observation for
+        that window, so no command (review 1919 repro 2 - per-window, not per-response,
+        baseline)."""
+        self.app.cache = MagicMock()
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'seven_day': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # switch, only 7d
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # 5h first appears, already high
+        ]
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.update()  # A five_hour@10
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}  # codex login to B
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # B seven_day@10 switch -> baseline only for seven_day
+        self.app.update()  # B five_hour@96 -> first observation of five_hour -> no command
+        self.assertFalse(any(
+            c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold' and c[0][1].get('USAGE_MONITOR_VARIANT') == 'five_hour'
+            for c in self._cmd.call_args_list
+        ))
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_new_window_first_high_observation_does_not_fire(self):
+        """Even WITHOUT an account switch, a quota window that only appears later in
+        the response (its first observation already high) must not fire - the baseline
+        guard is per-window, not just per-switch (review 1919)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 12.0, 'resets_at': ''}, 'seven_day': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+        ]
+        self.app.update()  # only five_hour observed
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # seven_day appears at 96 -> first observation -> no command
+        self.assertFalse(any(
+            c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold' and c[0][1].get('USAGE_MONITOR_VARIANT') == 'seven_day'
+            for c in self._cmd.call_args_list
+        ))
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_observed_window_survives_partial_response_then_fires(self):
+        """A window already observed must SURVIVE a verified partial response that
+        omits it: when it returns and crosses a threshold, on_threshold_command still
+        fires. _prev_utilization MERGES (not replaces), so the window's prior value
+        persists across the partial response (review 1919 re-review blocker)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'seven_day': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'seven_day': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # partial: five_hour omitted
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # five_hour returns and crosses
+        ]
+        self.app.update()  # both windows observed -> baseline
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # partial (only seven_day) -> five_hour baseline must persist
+        self.app.update()  # five_hour@96 -> genuine observed crossing -> fires once
+        threshold_calls = [
+            c for c in self._cmd.call_args_list
+            if c[0][1].get('USAGE_MONITOR_EVENT') == 'threshold' and c[0][1].get('USAGE_MONITOR_VARIANT') == 'five_hour'
+        ]
+        self.assertEqual(len(threshold_calls), 1)
+        self.assertEqual(threshold_calls[0][0][1]['USAGE_MONITOR_THRESHOLD'], '95')
+
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+    def test_partial_response_other_window_still_blocking_no_false_reset(self):
+        """A window dropping from high must NOT fire a reset while ANOTHER window's
+        last-known value is still blocking (>=99), even if that other window is
+        omitted from the current partial response - any_blocking uses the merged
+        last-known view (review 1919 re-review blocker 2)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'seven_day': {'utilization': 99.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # five_hour drops; seven_day omitted (last-known 99 still blocks)
+        ]
+        self.app.update()  # baseline both windows
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # five_hour 97->5, but seven_day last-known 99 blocks -> no reset
+        self.assertFalse(any(c[0][1].get('USAGE_MONITOR_EVENT') == 'reset' for c in self._cmd.call_args_list))
+
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+    def test_reset_command_exports_retained_value_for_omitted_window(self):
+        """When a reset fires on a partial response, the command payload exports the
+        OMITTED window's retained last-known value (not 0), so a user command that
+        gates on both quota values behaves correctly (review 1919 re-review blocker 3)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'seven_day': {'utilization': 98.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # five_hour resets; seven_day omitted (last-known 98, not blocking)
+        ]
+        self.app.update()  # baseline both windows
+        self._cmd.reset_mock()
+        self.app.update()  # five_hour 97->5; seven_day@98 not blocking -> reset fires
+        reset_calls = [c for c in self._cmd.call_args_list if c[0][1].get('USAGE_MONITOR_EVENT') == 'reset']
+        self.assertEqual(len(reset_calls), 1)
+        self.assertEqual(reset_calls[0][0][1]['USAGE_MONITOR_UTILIZATION_SEVEN_DAY'], '98')  # retained, not 0
+        self.assertEqual(reset_calls[0][0][1]['USAGE_MONITOR_UTILIZATION_FIVE_HOUR'], '5')
 
     def test_flapping_fires_verified_crossing_once_not_spam(self):
         """Source flapping is neither silent nor spammy: intervening session samples
