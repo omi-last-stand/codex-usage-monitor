@@ -51,11 +51,13 @@ class UsageMonitorForCodex:
         # Last raw API response (may contain 'error') - for icon and polling decisions
         self._last_response: dict[str, Any] = {}
 
-        # Notification state
+        # Notification state. _prev_utilization and _notified_thresholds are TRUSTED
+        # event state: written only by a verified live (api) sample of the currently
+        # displayed account (or explicitly reset on a verified account switch). An
+        # unverified / session / mismatched reading never writes them, so it can
+        # neither suppress nor spuriously fire a threshold or reset event.
         self._prev_utilization: dict[str, float] = {}
-        self._prev_verified = False  # was _prev_utilization set by a verified sample?
         self._prev_account_uuid: str | None = None
-        self._prev_usage_account_id: str | None = None
         self._prev_source: str | None = None
         self._first_update_done = False
         self._notified_thresholds: dict[str, float] = {}
@@ -271,66 +273,31 @@ class UsageMonitorForCodex:
             if isinstance(value, dict) and 'utilization' in value:
                 quota_fields[key] = value.get('utilization', 0) or 0
 
-        # Whether the PREVIOUS sample that set _prev_utilization was a fully
-        # verified, fully-processed sample. Only then is a drop a trustworthy quota
-        # reset - not a transition off an unverified / session / mismatched sample,
-        # whose utilization must never seed a false reset. Default this sample to
-        # unverified; it is marked verified only if it reaches the end of update().
-        prev_verified = self._prev_verified
-        self._prev_verified = False
-
-        # Local session-fallback data (and the first sample after any source
-        # switch) is unverified - it may be stale or from a different account -
-        # so it must drive the DISPLAY only, never notifications or event
-        # commands. Re-baseline silently and skip: a genuine change is acted on
-        # later from a verified live (api) sample. This also prevents source
-        # flapping from re-firing alerts/commands.
+        # Local session-fallback data is unverified - it may be stale or from a
+        # different account - so it drives the DISPLAY only, never notifications or
+        # event commands, and it must NEVER touch the trusted event state
+        # (_prev_utilization / _notified_thresholds). That state belongs exclusively
+        # to verified live (api) samples; letting a session reading write it would
+        # let a stale high session value suppress a later genuine verified threshold
+        # crossing, or a session drop be misread as a reset. The popup renders from
+        # the cache snapshot, so returning here costs nothing visible, and the
+        # documented contract holds: notifications and commands "resume the moment a
+        # live API reading succeeds" - that next live sample is processed normally
+        # below (including the first one after a session fallback, which refreshes
+        # the profile and can fire the startup command on the shared path).
         source = result.data.get('source')
-        source_changed = self._prev_source is not None and source != self._prev_source
         self._prev_source = source
-        if source == 'session' or source_changed:
-            self._prev_utilization = quota_fields
-            self._seed_threshold_baseline(result.data)
-            if source == 'api':
-                # Refresh the cached profile before this first verified live (api)
-                # sample reaches the display. A `codex login` performed during a
-                # session fallback changes the access token; without re-fetching
-                # here, the source-switch early return would leave the OLD
-                # account's email shown beside the NEW account's live usage and
-                # Credits until the next poll (account / credit misattribution).
-                self.cache.ensure_profile()
-                # Record the account this live sample was for, so the next sample
-                # can detect a same-token account switch (the early return here
-                # would otherwise skip the bookkeeping below and miss it).
-                self._prev_usage_account_id = result.data.get('account_id')
-                # The one-time startup command also fires on this first live sample
-                # (even after a session fallback), but only when the sample's account
-                # matches the refreshed profile - don't export a mid-account-switch
-                # sample; a deferred hook fires on the next consistent sample.
-                # Threshold/reset events stay suppressed (re-baselined above).
-                if self._identity_ok(result.data) and not self._first_update_done:
-                    self._run_startup_command(result.data)
-                    self._first_update_done = True
+        if source == 'session':
             return
 
-        # The account the live usage was actually fetched for (stamped from the
-        # request's ChatGPT-Account-Id). The (access_token, account_id)-keyed
-        # profile cache normally turns a same-token account switch into a uuid
-        # change the account-switch block below catches; tracking it here is a
-        # fallback for when that can't (e.g. the profile fetch returned None), so a
-        # cross-account drop is still re-baselined rather than misread as a reset.
-        usage_account_id = result.data.get('account_id')
-        account_id_changed = (
-            self._prev_usage_account_id is not None and usage_account_id is not None
-            and usage_account_id != self._prev_usage_account_id
-        )
-        self._prev_usage_account_id = usage_account_id
-
-        # Detect account switch: re-fetch the profile if the access token OR the
-        # account id changed, then compare UUIDs. A 'codex login' (new token) or a
-        # same-token workspace/account switch (new account id) yields a different
-        # account uuid, which re-baselines change-detection and prevents a false
-        # quota-reset notification.
+        # Detect an account switch by comparing the profile UUID across polls. The
+        # profile cache is keyed on (access_token, account_id), so ensure_profile()
+        # re-fetches when EITHER the access token changes (a `codex login`) OR the
+        # ChatGPT-Account-Id changes (a same-token workspace/account switch) - either
+        # yields a new account UUID here. On a switch, reset the trusted event state
+        # so the new account's usage is never compared against, or suppressed by, the
+        # old account's (which would otherwise fire a false reset or swallow a real
+        # crossing). No events fire on the switch sample itself.
         self.cache.ensure_profile()
         current_profile = self.cache.profile
         current_account_uuid = current_profile.get('account', {}).get('uuid') if isinstance(current_profile, dict) else None
@@ -342,33 +309,35 @@ class UsageMonitorForCodex:
             self._notified_thresholds = {}
             self._prev_account_uuid = current_account_uuid
             return
-        self._prev_account_uuid = current_account_uuid
+        # Preserve the last known account UUID across a transient profile-fetch
+        # failure (current_account_uuid is None). Overwriting it with None here would
+        # lose the prior identity, so a genuine switch A -> B whose first B-profile
+        # fetch failed would, once B's profile recovers, be MISSED by the uuid-switch
+        # above and B's usage misread against A's baseline (false reset / suppressed
+        # crossing). Only advance the baseline when we actually resolved a UUID.
+        if current_account_uuid is not None:
+            self._prev_account_uuid = current_account_uuid
 
-        # Fallback for a same-token account change the uuid-based switch above
-        # could not catch (e.g. the profile fetch failed, so the uuid did not
-        # change): re-baseline silently so the new account's usage is not compared
-        # against the old account's, which could otherwise fire a false reset
-        # notification / on_reset_command.
-        if account_id_changed:
-            self._prev_utilization = quota_fields
-            self._seed_threshold_baseline(result.data)
-            return
-
-        # Identity mismatch: this live sample's stamped account does not match the
-        # displayed profile (e.g. an account switch landing mid-request, so the
-        # usage is for a different account than the now-refreshed profile). Treat
-        # it like an unverified sample - re-baseline and drive NO notifications or
-        # event commands; the next identity-consistent sample resumes normally.
+        # Identity gate (fail-closed): a live (api) sample drives events and updates
+        # the trusted event state only when its stamped account POSITIVELY matches
+        # the displayed profile. An unidentified, partially identified, or mismatched
+        # sample - including a same-token account switch whose profile fetch has not
+        # refreshed yet, so the stamp is for a different account than is displayed -
+        # drives NO notifications or event commands and leaves the trusted event
+        # state untouched, so it can neither suppress nor spuriously fire an event for
+        # the verified account. The displayed account's baseline resumes unchanged on
+        # the next identity-consistent sample. (This check runs BEFORE any trusted-
+        # state write, so a stray cross-account sample can never write that state.)
         if not self._identity_ok(result.data):
-            self._prev_utilization = quota_fields
-            self._seed_threshold_baseline(result.data)
             return
 
         # Quota reset: notify AND run the reset command only on a *genuine* reset -
         # usage was near-exhausted and then dropped, with no other quota blocking.
         # A minor dip of the rolling window is not a reset and must not trigger an
-        # auto-command such as `codex resume`. While idle/locked, notifications are
-        # deferred until the user returns (avoids lock-screen privacy concerns).
+        # auto-command such as `codex resume`. _prev_utilization only ever holds a
+        # verified live sample's values (every untrusted sample returned above), so
+        # this compares verified-to-verified for the same account. While idle/locked,
+        # notifications are deferred until the user returns (lock-screen privacy).
         for key, pct in quota_fields.items():
             prev = self._prev_utilization.get(key)
             if prev is None:
@@ -382,7 +351,7 @@ class UsageMonitorForCodex:
             reset_threshold = 95 if unit == 'hour' else 98
             any_blocking = any(other_pct >= 99 for other_key, other_pct in quota_fields.items() if other_key != key)
 
-            if prev_verified and prev > reset_threshold and pct < prev and not any_blocking:
+            if prev > reset_threshold and pct < prev and not any_blocking:
                 self._notify_or_defer('reset', T['notify_reset'], T['notify_reset_title'])
                 self._run_reset_command(key, pct, prev, data=result.data, entry=result.data.get(key, {}))
                 self._idle_reset_pending = False
@@ -398,10 +367,13 @@ class UsageMonitorForCodex:
         elif self._fast_polls_remaining > 0:
             self._fast_polls_remaining -= 1
 
-        self._prev_utilization = quota_fields
-        # This sample was fully verified and processed, so its utilization is a
-        # trustworthy baseline for the next sample's reset detection.
-        self._prev_verified = True
+        # Keep the last verified quota baseline across a quota-less verified response
+        # (e.g. a credits-only Pro payload with no five_hour/seven_day window): an
+        # empty quota set has nothing to reset-detect and must not clobber a real
+        # prior baseline, or a later genuine reset would be lost. A genuine account
+        # switch already reset the baseline above.
+        if quota_fields:
+            self._prev_utilization = quota_fields
 
         # Fire the one-time startup command on the first successful update, but
         # only when this live sample's account matches the displayed profile -
@@ -416,8 +388,9 @@ class UsageMonitorForCodex:
         (api) samples: a live sample drives notifications / event commands only when
         its account is POSITIVELY verified - the usage carries an account_id, the
         cached profile carries a uuid, and they match. An unidentified, partially
-        identified, or mismatched live sample is suppressed (re-baselined). Non-api
-        samples (session is already gated upstream) are not account-checked here.
+        identified, or mismatched live sample is suppressed: the caller returns and
+        leaves the trusted event state untouched. Non-api samples (session is already
+        gated upstream) are not account-checked here.
         """
         if data.get('source') != 'api':
             return True
@@ -451,45 +424,6 @@ class UsageMonitorForCodex:
         for message, title in self._deferred_notifications.values():
             self.icon.notify(message, title)
         self._deferred_notifications.clear()
-
-    def _seed_threshold_baseline(self, data: dict[str, Any]) -> None:
-        """Seed notified-threshold baselines from the current sample without firing.
-
-        Used when the data source switches (live API <-> session fallback) or when
-        an unverified / mid-account-switch live sample is processed, so an
-        already-exceeded threshold in that sample is treated as already-notified and
-        does not emit a spurious alert or command.  A genuine later increase past a
-        higher threshold still fires on the next poll.
-
-        This only ever RAISES a baseline, never lowers it: an unverified or
-        display-only sample must not reset a threshold that a previously *verified*
-        sample already notified, or the next verified high sample would be treated
-        as a fresh crossing and re-fire ``on_threshold_command``.  The legitimate
-        "usage dropped, re-arm" path lives in :meth:`_check_threshold_alerts`, which
-        runs only for verified samples.
-        """
-        for variant_key, entry in data.items():
-            if variant_key == 'extra_usage':
-                continue
-            if not isinstance(entry, dict) or entry.get('utilization') is None:
-                continue
-            pct = entry['utilization']
-            exceeded = [t for t in get_alert_thresholds(variant_key) if pct >= t]
-            seed = max(exceeded) if exceeded else 0
-            self._notified_thresholds[variant_key] = max(
-                self._notified_thresholds.get(variant_key, 0), seed
-            )
-
-        extra = data.get('extra_usage')
-        if extra and extra.get('is_enabled'):
-            limit = extra.get('monthly_limit', 0) or 0
-            if limit > 0:
-                pct = (extra.get('used_credits', 0) or 0) / limit * 100
-                exceeded = [t for t in get_alert_thresholds('extra_usage') if pct >= t]
-                seed = max(exceeded) if exceeded else 0
-                self._notified_thresholds['extra_usage'] = max(
-                    self._notified_thresholds.get('extra_usage', 0), seed
-                )
 
     def _check_threshold_alerts(self, data: dict[str, Any]) -> None:
         """Show a notification when usage crosses a configured threshold.

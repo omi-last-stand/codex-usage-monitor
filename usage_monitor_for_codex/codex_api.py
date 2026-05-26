@@ -188,8 +188,8 @@ def fetch_usage() -> dict[str, Any]:
 
     # Other errors (expired token, connection, server, no data): degrade to the
     # newest local session snapshot so the widget keeps showing usage.  It
-    # carries ``source='session'``; the app re-baselines change-detection on a
-    # source switch so a stale sample is not misread as a reset or threshold.
+    # carries ``source='session'``; the app treats session data as display-only and
+    # never lets it touch event state, so a stale sample drives no reset or threshold.
     fallback = _fetch_usage_session()
     if fallback:
         fallback['api_error'] = api_result.get('error')

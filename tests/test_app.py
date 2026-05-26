@@ -42,10 +42,6 @@ def _make_app(thresholds: list[float] | None = None) -> UsageMonitorForCodex:
     ]
     for active_patch in app._active_patches:
         active_patch.start()
-    # Default to a verified prior baseline: most tests set _prev_utilization to
-    # simulate a previous (verified) poll, so reset detection should trust it.
-    # Tests of the unverified path drive an unverified sample which clears this.
-    app._prev_verified = True
     return app
 
 
@@ -2402,27 +2398,31 @@ class TestSourceSwitchGuard(unittest.TestCase):
         self.app.icon.notify.assert_called_once()  # crosses 80 like a normal first sample
         self.assertEqual(self.app._prev_source, 'api')
 
-    def test_switch_suppresses_threshold_notification(self):
-        """A stale high sample after an api->session switch must not alert."""
+    def test_session_sample_is_display_only_and_does_not_pollute_baseline(self):
+        """A high SESSION sample is display-only: it must not alert AND must not
+        touch the verified threshold baseline, so it can neither fire nor later
+        suppress a real verified crossing (trusted state is api-only)."""
         self._feed(10, 'api')
         self.app.icon.notify.reset_mock()
-        self._feed(90, 'session')  # source switch
+        self._feed(90, 'session')  # display-only source
         self.app.icon.notify.assert_not_called()
-        # baseline seeded so 90 is treated as already-notified at the 80 threshold
-        self.assertEqual(self.app._notified_thresholds.get('five_hour'), 80)
+        # the trusted baseline stays at the api@10 level (unset / 0), NOT raised to
+        # 80 by the session reading
+        self.assertEqual(self.app._notified_thresholds.get('five_hour', 0), 0)
         self.assertEqual(self.app._prev_source, 'session')
 
     def test_increase_after_returning_to_api_alerts(self):
-        """After a session detour, a live increase past a threshold fires again.
+        """After a session detour, a verified live increase past a threshold fires.
 
-        Session data never alerts; alerts resume only from verified live (api)
-        samples, and only on a real increase (not the re-baseline cycle).
+        Session data never alerts and never touches the trusted event state; the
+        verified live (api) samples are processed normally, so a real increase past
+        a threshold fires.
         """
-        self._feed(10, 'api')
-        self._feed(90, 'session')  # session: display only, baseline seeded, no fire
-        self._feed(50, 'api')      # back to live (source change): re-baseline, no fire
+        self._feed(10, 'api')      # verified, below thresholds
+        self._feed(90, 'session')  # display-only: ignored for events
+        self._feed(50, 'api')      # verified, still below 80 -> no fire
         self.app.icon.notify.reset_mock()
-        self._feed(96, 'api')      # live increase past 95 -> fires
+        self._feed(96, 'api')      # verified increase past 95 -> fires
         self.app.icon.notify.assert_called_once()
 
     def test_session_data_never_fires_alerts(self):
@@ -2458,30 +2458,30 @@ class TestSourceSwitchGuard(unittest.TestCase):
         self.app.update()  # recovered api (source switch): MUST refresh profile
         self.app.cache.ensure_profile.assert_called_once()
 
-    def test_usage_account_id_change_suppresses_false_reset(self):
-        """A same-token ChatGPT-Account-Id change (the live usage's account_id
-        changes but the profile uuid does not, so the uuid-based switch detection
-        misses it) re-baselines instead of misreading the new account's lower
-        usage as a reset of the old account's near-exhausted quota."""
+    def test_mismatched_account_sample_ignored_preserves_baseline(self):
+        """A same-token ChatGPT-Account-Id change whose profile fetch has not yet
+        refreshed (the live usage's account_id differs from the displayed profile
+        uuid) is a MISMATCH: it is ignored entirely - no false reset, and crucially
+        it does NOT overwrite the verified account's baseline, so that account's
+        events still work when its identity-consistent samples resume."""
         self.app.cache = MagicMock()
-        # Profile matches the FIRST sample's account (acct-A), so it is verified and
-        # processed; the SECOND sample's account_id change is what must re-baseline.
+        # Profile is acct-A throughout; the SECOND sample (acct-B) cannot be verified
+        # against it, so it must be ignored without touching trusted state.
         self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
         self.app.cache.update.side_effect = [
             UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
             UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),
         ]
-        self.app.update()  # account A near its limit (verified)
+        self.app.update()  # account A near its limit (verified) -> baseline {97}
         self.app.icon.notify.reset_mock()
-        self.app.update()  # account B (account_id changed) low usage -> re-baseline, NOT a reset
+        self.app.update()  # acct-B mismatch -> ignored, NOT a reset, baseline preserved
         self.app.icon.notify.assert_not_called()
-        self.assertEqual(self.app._prev_utilization, {'five_hour': 5.0})
+        self.assertEqual(self.app._prev_utilization, {'five_hour': 97.0})
 
-    def test_account_id_change_after_session_recovery_suppresses_reset(self):
-        """The same-token account_id guard also covers the session->api recovery
-        path: the recovery sample records its account_id despite the source-switch
-        early return, so a later same-token account change is re-baselined, not
-        misread as a reset."""
+    def test_mismatched_samples_after_session_recovery_ignored(self):
+        """After a session fallback, live samples whose stamped account never matches
+        the displayed profile uuid are all mismatches - ignored for events and never
+        written to the trusted baseline (fail-closed; no false reset)."""
         self.app.cache = MagicMock()
         self.app.cache.profile = {'account': {'uuid': 'uuid-fixed', 'email': 'x@example.com'}}
         self.app.cache.update.side_effect = [
@@ -2489,17 +2489,105 @@ class TestSourceSwitchGuard(unittest.TestCase):
             UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
             UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),
         ]
-        self.app.update()  # session fallback
-        self.app.update()  # recovery api A@97 (source switch) -> records acct-A
+        self.app.update()  # session fallback (display-only)
+        self.app.update()  # api acct-A but profile uuid-fixed -> mismatch -> ignored
         self.app.icon.notify.reset_mock()
-        self.app.update()  # api B@5 (same token, account_id changed) -> re-baseline, NOT a reset
+        self.app.update()  # api acct-B -> mismatch -> ignored, NOT a reset
         self.app.icon.notify.assert_not_called()
-        self.assertEqual(self.app._prev_utilization, {'five_hour': 5.0})
+        self.assertEqual(self.app._prev_utilization, {})
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_mismatched_sample_does_not_suppress_verified_crossing(self):
+        """A mismatched (different-account) live sample between two verified samples
+        of the DISPLAYED account must not write trusted state, so the displayed
+        account's real crossing still fires (review 1633 re-review blocker 1)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # mismatch (B != profile A)
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # verified A crossing
+        ]
+        self.app.update()  # A@10 verified
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # B@96 mismatch -> ignored, baseline untouched
+        self.app.update()  # A@96 verified -> real 95% crossing fires
+        self.app.icon.notify.assert_called_once()
+        self._cmd.assert_called_once()
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'threshold')
+
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+    def test_mismatched_sample_does_not_suppress_verified_reset(self):
+        """A mismatched sample between two verified same-account samples must not
+        break reset detection: the verified near-exhaustion -> verified drop is still
+        a genuine reset (review 1633 re-review blocker 1)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # mismatch
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+        ]
+        self.app.update()  # A@97 verified
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # B@97 mismatch -> ignored, baseline preserved at 97
+        self.app.update()  # A@5 verified -> genuine reset fires
+        self._cmd.assert_called_once()
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'reset')
+
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+    def test_quotaless_response_preserves_verified_baseline(self):
+        """A verified response with no quota windows (e.g. a credits-only Pro payload)
+        must not clear the verified quota baseline, so a later genuine reset is still
+        detected (review 1633 re-review blocker 2)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}, 'source': 'api', 'account_id': 'acct-A'}),  # quota-less
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+        ]
+        self.app.update()  # A@97 -> baseline {97}
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # credits-only verified -> must NOT clear the baseline
+        self.assertEqual(self.app._prev_utilization, {'five_hour': 97.0})
+        self.app.update()  # A@5 -> genuine reset still detected
+        self._cmd.assert_called_once()
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'reset')
+
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+    def test_account_switch_with_transient_null_profile_no_false_reset(self):
+        """A genuine A->B switch whose first B-profile fetch transiently returns None
+        must not lose A's identity. When B's profile recovers, the uuid-switch fires
+        and resets trusted state, so B@5 is NOT misread as a reset of A@97 (review
+        1633 re-review blocker: _prev_account_uuid must survive a None profile)."""
+        self.app.cache = MagicMock()
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # profile None
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # profile recovered
+        ]
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.update()  # A@97 verified -> baseline {97}, _prev_account_uuid='acct-A'
+        self.app.cache.profile = None  # transient profile-fetch failure
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # B@5 profile None -> mismatch, ignored; _prev_account_uuid kept as acct-A
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}  # recovered
+        self.app.update()  # B@5 profile B -> uuid switch A->B resets state, NO false reset
+        self.assertFalse(any(c[0][1].get('USAGE_MONITOR_EVENT') == 'reset' for c in self._cmd.call_args_list))
+        self.assertEqual(self.app._prev_account_uuid, 'acct-B')
+        self.assertEqual(self.app._prev_utilization, {})  # reset on the verified switch
 
     def test_account_mismatch_live_sample_suppresses_events(self):
         """A live sample whose stamped account differs from the displayed profile
-        (e.g. a switch landing mid-request) is re-baselined like an unverified
-        sample: no threshold/reset notification fires, even at high utilization."""
+        (e.g. a switch landing mid-request) is ignored like an unverified sample: no
+        threshold/reset notification fires, even at high utilization, and the trusted
+        event state is left untouched."""
         self.app.cache = MagicMock()
         self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}
         self.app.cache.update.return_value = UpdateResult(
@@ -2510,8 +2598,8 @@ class TestSourceSwitchGuard(unittest.TestCase):
 
     def test_unidentified_live_sample_suppresses_events(self):
         """A live sample with NO account_id, against a known profile account, cannot
-        be verified (fail-closed) and is re-baselined - no threshold notification
-        fires even at high utilization."""
+        be verified (fail-closed) and is ignored (trusted state untouched) - no
+        threshold notification fires even at high utilization."""
         self.app.cache = MagicMock()
         self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}
         self.app.cache.update.return_value = UpdateResult(
@@ -2538,13 +2626,14 @@ class TestSourceSwitchGuard(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
     @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
     def test_unverified_sample_does_not_rearm_threshold(self):
-        """An unverified live sample must NOT lower (re-arm) a threshold that a
-        previously *verified* sample already notified. Otherwise the next verified
-        high sample is misread as a fresh crossing and re-runs on_threshold_command.
+        """An unverified live sample must NOT touch the trusted threshold baseline,
+        so it can neither re-arm a threshold a previously *verified* sample notified
+        (the next verified high sample would re-run on_threshold_command) nor get
+        ahead of it.
 
         Repro: verified api@96 (notifies + commands at 95) -> unverified api@5 (no
-        account_id) -> verified api@96 again. The middle (display-only) sample must
-        not reset the seeded baseline to 0, so the final sample stays silent.
+        account_id) -> verified api@96 again. The middle (display-only) sample leaves
+        the baseline at 95, so the final sample stays silent.
         """
         self.app.cache = MagicMock()
         self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
@@ -2563,13 +2652,153 @@ class TestSourceSwitchGuard(unittest.TestCase):
         self.app.icon.notify.assert_not_called()
         self._cmd.assert_not_called()
 
-    def test_repeated_flapping_does_not_fire(self):
-        """Every poll being a source switch suppresses alerts entirely (no spurious fire)."""
-        self._feed(10, 'api')  # establish, low
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_unidentified_sample_does_not_suppress_verified_crossing(self):
+        """An unidentified live sample between two verified samples must not raise
+        the trusted baseline, so the real verified crossing still notifies AND runs
+        on_threshold_command (review 1633 repro 1)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api'}),  # unidentified (no account_id)
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # verified crossing
+        ]
+        self.app.update()  # A@10 verified, below thresholds (sets first_update_done)
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # unidentified@96 -> display-only, no event, baseline untouched
+        self.app.update()  # verified A@96 -> real 95% crossing fires
+        self.app.icon.notify.assert_called_once()
+        self._cmd.assert_called_once()
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'threshold')
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_session_high_sample_does_not_suppress_later_api_crossing(self):
+        """A high SESSION reading during a fallback must not raise the trusted
+        baseline, so a real verified crossing after recovery still fires - the docs'
+        "events resume on the next live reading" contract (review 1633 repro 2)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'session'}),  # display-only
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # recovery
+            UpdateResult(data={'five_hour': {'utilization': 85.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # 80% crossing
+        ]
+        self.app.update()  # A@10
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # session@96 -> ignored for events
+        self.app.update()  # recovery A@10 -> no crossing
+        self.app.update()  # A@85 -> crosses 80
+        self.app.icon.notify.assert_called_once()
+        self._cmd.assert_called_once()
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'threshold')
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_THRESHOLD'], '80')
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_session_high_sample_does_not_suppress_later_95_crossing(self):
+        """Variant of the above for the higher threshold: a high session value does
+        not pre-arm 95, so a verified climb to 96 after recovery still fires it
+        (review 1633 repro 2)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'session'}),
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+        ]
+        self.app.update()
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # session@96 ignored
+        self.app.update()  # recovery A@10
+        self.app.update()  # A@96 -> crosses 95
+        self.app.icon.notify.assert_called_once()
+        self._cmd.assert_called_once()
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_THRESHOLD'], '95')
+
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+    def test_unidentified_sample_does_not_suppress_verified_reset(self):
+        """An unidentified live sample between two verified same-account samples must
+        not break reset detection: the verified near-exhaustion -> verified drop is
+        still a genuine reset and runs on_reset_command (review 1633 repro 3)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api'}),  # unidentified
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+        ]
+        self.app.update()  # A@97 verified (near limit)
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # unidentified@97 -> ignored, baseline preserved at 97
+        self.app.update()  # verified A@5 -> genuine reset
+        self._cmd.assert_called_once()
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'reset')
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_verified_drop_rearms_threshold(self):
+        """A genuine VERIFIED drop below a threshold re-arms it, so a later verified
+        climb past it fires on_threshold_command again - the legitimate re-arm path
+        (review 1633)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # verified drop
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # climb back
+        ]
+        self.app.update()  # A@96 (first: notify 95, no command yet)
+        self.app.update()  # A@5 verified drop -> re-arm (notified lowered to 0)
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # A@96 again -> fires threshold + command
+        self.app.icon.notify.assert_called_once()
+        self._cmd.assert_called_once()
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'threshold')
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_verified_account_switch_does_not_carry_threshold_state(self):
+        """A verified account switch (A -> B) must not carry A's notified-threshold
+        history to B, so B's own crossing is not silently suppressed (review 1633)."""
+        self.app.cache = MagicMock()
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # switch
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),  # B's own crossing
+        ]
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.update()  # A@96 -> notify 95, notified=95 for A
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}  # codex login to B
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # B@96 -> uuid switch A->B: reset trusted state, no threshold cmd
+        self.app.update()  # B@96 -> B's own 95% crossing, NOT suppressed by A's history
+        self._cmd.assert_called_once()
+        self.assertEqual(self._cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'threshold')
+
+    def test_flapping_fires_verified_crossing_once_not_spam(self):
+        """Source flapping is neither silent nor spammy: intervening session samples
+        are display-only (ignored for events), while the verified (api) progression
+        past a threshold fires exactly once. A later api sample still above the same
+        threshold does not re-fire - honoring the documented "resume on live API
+        reading" contract without re-alerting on every flap."""
+        self._feed(10, 'api')  # establish, low (no crossing)
         self.app.icon.notify.reset_mock()
         for src, util in (('session', 90), ('api', 91), ('session', 92), ('api', 93)):
             self._feed(util, src)
-        self.app.icon.notify.assert_not_called()
+        # api@91 crosses 80 -> fires once; session@90/@92 ignored; api@93 is still
+        # above 80 but already notified -> no re-fire.
+        self.app.icon.notify.assert_called_once()
 
 
 if __name__ == '__main__':
