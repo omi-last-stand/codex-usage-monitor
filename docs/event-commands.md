@@ -92,6 +92,9 @@ The same pattern works for the weekly window (`seven_day`) and for `on_threshold
 }
 ```
 
+> [!NOTE]
+> The examples below send your usage message to a third-party service (Pushover, Telegram). The app itself only talks to `chatgpt.com`; a command like these transmits usage information to the destination **you** configure. See the [Privacy Policy](../PRIVACY.md#commands-you-configure).
+
 ### Play a sound and send a push notification when the quota resets
 
 ```json

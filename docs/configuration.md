@@ -29,7 +29,7 @@ Codex usage can come from two places. The live API gives the freshest numbers; t
 
 - **`"auto"`** (default) - try the live API (`https://chatgpt.com/backend-api/wham/usage`) first, then fall back to the newest local session rollout file if the API is unavailable (offline, token expired, etc.).
 - **`"api"`** - use only the live API. Requires a valid access token in `~/.codex/auth.json`; never reads session files.
-- **`"session"`** - use only the local session rollout files (`~/.codex/sessions/.../rollout-*.jsonl`). Makes **no network connection** and needs no token. The numbers are as fresh as your most recent Codex turn.
+- **`"session"`** - use only the local session rollout files (`~/.codex/sessions/.../rollout-*.jsonl`). Makes **no network connection** and needs no token. The numbers are as fresh as your most recent Codex turn, read from the newest snapshot within a bounded set of recent files (rarely, a resumed much-older session can lag — see [API Reference](api-reference.md#session-file-fallback--codexsessionsrollout-jsonl)).
 
 An unrecognized value falls back to `"auto"`. See [API Reference](api-reference.md) for the underlying data sources.
 

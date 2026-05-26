@@ -135,6 +135,9 @@ These are JSONL transcripts the Codex CLI writes per session. The app scans a bo
 
 (`payload.info.rate_limits`, `payload.rate_limits`, or a top-level `rate_limits`). The most recent snapshot found is transformed with the same `primary`/`secondary` → `five_hour`/`seven_day` mapping described above, and tagged `"source": "session"`. This path needs **no network and no token**, but the numbers are only as fresh as your last Codex turn.
 
+> [!NOTE]
+> The session value is the newest record **within a bounded candidate set** (the most recent files by modification time and by path), chosen for performance so the app never opens every rollout file on each poll. In an unusual case — you resume a much older session while many newer sessions exist, *and* that old file's modification time was altered by a sync/restore/touch — its fresh record can fall outside the candidate set. The displayed value then lags the true newest until the live API succeeds (or newer sessions shift the candidate ordering); in explicit `"session"` mode, where the API is never tried, it can stay stale until then. This affects the session/fallback display only (it never drives notifications, event commands, account, or Credits), and the live API always has the authoritative numbers.
+
 ## JWT profile
 
 The account email and plan are read locally from the `id_token` JWT in `auth.json` - **no network call**. The token's payload segment is base64url-decoded and its (unverified) claims are read:

@@ -842,5 +842,59 @@ class TestEnsureProfileTokenChange(unittest.TestCase):
         mock_profile.assert_not_called()
 
 
+class TestSuccessRefreshesProfileAtomically(unittest.TestCase):
+    """A successful fetch refreshes a stale profile in the SAME commit as usage,
+    so a CacheSnapshot never pairs new-account usage with the old account email
+    (the popup reads the snapshot on its own timer)."""
+
+    @patch('usage_monitor_for_codex.cache.fetch_usage',
+           return_value={'five_hour': {'utilization': 5.0}, 'source': 'api'})
+    @patch('usage_monitor_for_codex.cache.fetch_profile')
+    @patch('usage_monitor_for_codex.cache.read_access_token')
+    def test_token_change_refreshes_profile_with_usage(self, mock_token, mock_profile, _mock_usage):
+        """When the token changed since the profile was cached, update() publishes
+        the new usage and the new profile together (consistent snapshot)."""
+        mock_token.return_value = 'token-a'
+        mock_profile.return_value = {'account': {'uuid': 'uuid-A', 'email': 'a@example.com'}}
+        cache = _make_cache()
+        cache.ensure_profile()  # account A cached
+
+        # User logged into account B; the next successful fetch is account B's.
+        mock_token.return_value = 'token-b'
+        mock_profile.return_value = {'account': {'uuid': 'uuid-B', 'email': 'b@example.com'}}
+        cache.update()
+
+        snap = cache.snapshot
+        self.assertEqual(snap.usage['five_hour']['utilization'], 5.0)
+        self.assertEqual(snap.profile, {'account': {'uuid': 'uuid-B', 'email': 'b@example.com'}})
+
+    @patch('usage_monitor_for_codex.cache.fetch_usage',
+           return_value={'five_hour': {'utilization': 5.0}, 'source': 'api'})
+    @patch('usage_monitor_for_codex.cache.fetch_profile')
+    @patch('usage_monitor_for_codex.cache.read_access_token', return_value='token-a')
+    def test_unchanged_token_does_not_refetch_profile(self, _mock_token, mock_profile, _mock_usage):
+        """A success with an unchanged token does not re-fetch the profile."""
+        mock_profile.return_value = {'account': {'uuid': 'uuid-A'}}
+        cache = _make_cache()
+        cache.ensure_profile()
+        mock_profile.reset_mock()
+
+        cache.update()
+
+        mock_profile.assert_not_called()
+        self.assertEqual(cache.profile, {'account': {'uuid': 'uuid-A'}})
+
+    @patch('usage_monitor_for_codex.cache.fetch_usage',
+           return_value={'five_hour': {'utilization': 5.0}, 'source': 'api'})
+    def test_no_profile_cached_leaves_cold_start_to_ensure_profile(self, _mock_usage):
+        """With no profile cached yet, the success path does not fetch the profile -
+        the cold-start fetch is left to ensure_profile() as before."""
+        cache = _make_cache()
+        with patch('usage_monitor_for_codex.cache.fetch_profile') as mock_profile:
+            cache.update()
+            mock_profile.assert_not_called()
+        self.assertIsNone(cache.profile)
+
+
 if __name__ == '__main__':
     unittest.main()

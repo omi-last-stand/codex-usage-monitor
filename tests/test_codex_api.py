@@ -770,6 +770,47 @@ class TestSessionFallback(unittest.TestCase):
         self.assertEqual(result['source'], 'session')
         self.assertEqual(result['five_hour']['utilization'], 10.0)  # the real newest content
 
+    @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'session')
+    def test_record_outside_bounded_candidate_set_is_accepted_limitation(self):
+        """DOCUMENTED LIMITATION (performance tradeoff): the scan is bounded, so a
+        fresh record living in a much-older-dated file whose mtime was also
+        clobbered - behind a full cap's worth of newer files in BOTH the mtime and
+        path orderings - is not found, and the bounded value is shown instead.
+        This pins the accepted behavior described in the api-reference 'session
+        value is the newest within a bounded candidate set' note; if this is ever
+        changed to an exhaustive scan, update this test and that note together."""
+        import os
+        import time
+        with TemporaryDirectory() as tmp:
+            sessions = Path(tmp)
+
+            def write(day, name, ts, used, mtime):
+                d = sessions / day
+                d.mkdir(parents=True, exist_ok=True)
+                rl = {'primary': {'used_percent': used, 'window_minutes': 300, 'resets_at': 1779754106}}
+                rec = {'timestamp': ts, 'payload': {'type': 'token_count', 'info': {'rate_limits': rl}}}
+                p = d / f'rollout-{name}.jsonl'
+                p.write_text(json.dumps(rec) + '\n', encoding='utf-8')
+                os.utime(p, (mtime, mtime))
+
+            now = time.time()
+            # 40 newer-dated files with newer mtimes fill BOTH capped orderings.
+            for i in range(40):
+                write('2026/05/26', f'2026-05-26T00-00-00-decoy{i:02d}',
+                      '2026-05-26T10:00:00Z', 90, now)
+            # A resumed, much-older-dated session holds the genuinely newest record
+            # but has both an older path and a clobbered (old) mtime -> outside both
+            # candidate sets, so it is (by design) not selected.
+            write('2026/05/20', '2026-05-20T09-00-00-resumed',
+                  '2026-05-26T11:00:00Z', 5, now - 10_000)
+
+            with patch('usage_monitor_for_codex.codex_api.CODEX_SESSIONS_DIR', sessions):
+                result = fetch_usage()
+
+        # Bounded behavior: the in-window value (10:00 / 90%) wins; the out-of-window
+        # 11:00 / 5% record is intentionally not reached.
+        self.assertEqual(result['five_hour']['utilization'], 90.0)
+
     @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'auto')
     @patch('usage_monitor_for_codex.codex_api.requests.get', side_effect=requests.ConnectionError())
     @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})

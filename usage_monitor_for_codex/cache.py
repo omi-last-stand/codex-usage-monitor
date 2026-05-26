@@ -263,6 +263,22 @@ class UsageCache:
 
     def _record_success(self, data: dict[str, Any]) -> None:
         """Apply common state updates after a successful API response."""
+        # If a profile is already cached and the access token has since changed
+        # (e.g. the user ran `codex login`), refresh the profile in the SAME
+        # critical section as the usage. The popup reads CacheSnapshot on its own
+        # 500ms timer, so committing usage now and the profile later (via
+        # ensure_profile) would leave a window where new-account usage/Credits
+        # render beside the old account's email. fetch_profile() is a local
+        # JWT decode of auth.json - no network. (When no profile is cached yet,
+        # the cold-start path is left to ensure_profile() as before.)
+        new_profile = self._profile
+        new_profile_token = self._profile_token
+        if self._profile is not None:
+            current_token = read_access_token()
+            if self._profile_token != current_token:
+                new_profile = fetch_profile()
+                new_profile_token = current_token
+
         # _usage is always reassigned (never mutated in place), so existing
         # CacheSnapshot references remain valid after this update.
         with self._state_lock:
@@ -272,6 +288,8 @@ class UsageCache:
             self._rate_limit_until = 0
             self._last_failed_token = None
             self._usage = data
+            self._profile = new_profile
+            self._profile_token = new_profile_token
             self._refreshing = False
             self._version += 1
 

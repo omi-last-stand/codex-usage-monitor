@@ -2376,6 +2376,24 @@ class TestSourceSwitchGuard(unittest.TestCase):
         self._feed(3, 'session')  # switch + big drop -> no reset notification
         self.app.icon.notify.assert_not_called()
 
+    def test_source_switch_to_api_refreshes_profile(self):
+        """The first verified live (api) sample after a session fallback refreshes
+        the cached profile, so a `codex login` performed during the fallback cannot
+        leave the old account's email beside the new account's live usage/Credits."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'uuid-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 10.0, 'resets_at': ''}, 'source': 'api'}),
+            UpdateResult(data={'five_hour': {'utilization': 50.0, 'resets_at': ''}, 'source': 'session'}),
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api'}),
+        ]
+
+        self.app.update()  # api: account A established (normal path refreshes profile)
+        self.app.update()  # session fallback: no profile refresh
+        self.app.cache.ensure_profile.reset_mock()
+        self.app.update()  # recovered api (source switch): MUST refresh profile
+        self.app.cache.ensure_profile.assert_called_once()
+
     def test_repeated_flapping_does_not_fire(self):
         """Every poll being a source switch suppresses alerts entirely (no spurious fire)."""
         self._feed(10, 'api')  # establish, low

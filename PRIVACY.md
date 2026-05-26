@@ -4,13 +4,23 @@
 
 ## Data Collection
 
-This application does **not** collect, store, or transmit any personal data.
+This application does **not** collect or store any personal data. It transmits none on its own - the
+only exception is data that an [event command **you** configure](#commands-you-configure) chooses to
+send (see Network Communication below).
 
 ## Network Communication
 
-The application communicates exclusively with `chatgpt.com` to retrieve your current Codex usage data.
-No other network connections are made. (When the local-session data source is selected, it makes no
-network connection at all.)
+On its own, the application communicates **exclusively** with `chatgpt.com` to retrieve your current
+Codex usage data. It makes no other network connections of its own accord. (When the local-session
+data source is selected, it makes no network connection at all.)
+
+### Commands you configure
+
+The optional [event commands](docs/event-commands.md) (`on_reset_command`, `on_threshold_command`,
+`on_startup_command`) run programs **you** specify. If you configure one that sends data over the
+network - for example the documentation's sample `curl` commands that post a usage message to Pushover
+or Telegram - then that usage information is sent to the destination you chose, under your control.
+No event commands are configured by default, and the application never adds them.
 
 ## Credentials
 

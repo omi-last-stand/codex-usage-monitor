@@ -278,15 +278,20 @@ class UsageMonitorForCodex:
         if source == 'session' or source_changed:
             self._prev_utilization = quota_fields
             self._seed_threshold_baseline(result.data)
-            # The one-time startup command must fire on the first *verified live*
-            # (api) sample even when it arrives after an initial session fallback
-            # (i.e. this is a source switch). Threshold/reset events stay
-            # suppressed (re-baselined above), but the startup hook should not be
-            # delayed to the next poll just because the first live data followed
-            # a session sample.
-            if source == 'api' and not self._first_update_done:
-                self._run_startup_command(result.data)
-                self._first_update_done = True
+            if source == 'api':
+                # Refresh the cached profile before this first verified live (api)
+                # sample reaches the display. A `codex login` performed during a
+                # session fallback changes the access token; without re-fetching
+                # here, the source-switch early return would leave the OLD
+                # account's email shown beside the NEW account's live usage and
+                # Credits until the next poll (account / credit misattribution).
+                self.cache.ensure_profile()
+                # The one-time startup command must also fire on this first live
+                # sample even when it follows a session fallback; threshold/reset
+                # events stay suppressed (re-baselined above).
+                if not self._first_update_done:
+                    self._run_startup_command(result.data)
+                    self._first_update_done = True
             return
 
         # Detect account switch: re-fetch profile if the access token changed, then compare UUIDs.
