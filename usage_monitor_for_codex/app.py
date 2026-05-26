@@ -294,10 +294,12 @@ class UsageMonitorForCodex:
                 # can detect a same-token account switch (the early return here
                 # would otherwise skip the bookkeeping below and miss it).
                 self._prev_usage_account_id = result.data.get('account_id')
-                # The one-time startup command must also fire on this first live
-                # sample even when it follows a session fallback; threshold/reset
-                # events stay suppressed (re-baselined above).
-                if not self._first_update_done:
+                # The one-time startup command also fires on this first live sample
+                # (even after a session fallback), but only when the sample's account
+                # matches the refreshed profile - don't export a mid-account-switch
+                # sample; a deferred hook fires on the next consistent sample.
+                # Threshold/reset events stay suppressed (re-baselined above).
+                if self._identity_ok(result.data) and not self._first_update_done:
                     self._run_startup_command(result.data)
                     self._first_update_done = True
             return
@@ -343,6 +345,16 @@ class UsageMonitorForCodex:
             self._seed_threshold_baseline(result.data)
             return
 
+        # Identity mismatch: this live sample's stamped account does not match the
+        # displayed profile (e.g. an account switch landing mid-request, so the
+        # usage is for a different account than the now-refreshed profile). Treat
+        # it like an unverified sample - re-baseline and drive NO notifications or
+        # event commands; the next identity-consistent sample resumes normally.
+        if not self._identity_ok(result.data):
+            self._prev_utilization = quota_fields
+            self._seed_threshold_baseline(result.data)
+            return
+
         # Quota reset: notify AND run the reset command only on a *genuine* reset -
         # usage was near-exhausted and then dropped, with no other quota blocking.
         # A minor dip of the rolling window is not a reset and must not trigger an
@@ -379,10 +391,24 @@ class UsageMonitorForCodex:
 
         self._prev_utilization = quota_fields
 
-        if not self._first_update_done:
+        # Fire the one-time startup command on the first successful update, but
+        # only when this live sample's account matches the displayed profile -
+        # never export a mid-account-switch sample. A deferred hook fires on the
+        # next identity-consistent sample.
+        if not self._first_update_done and self._identity_ok(result.data):
             self._run_startup_command(result.data)
+            self._first_update_done = True
 
-        self._first_update_done = True
+    def _identity_ok(self, data: dict[str, Any]) -> bool:
+        """True unless the live sample's stamped account is known to differ from
+        the cached profile's account - i.e. a mid-account-switch sample whose
+        usage belongs to a different account than the one now displayed. Gates
+        event export so a mismatched live sample never drives a command.
+        """
+        prof = self.cache.profile
+        profile_uuid = prof.get('account', {}).get('uuid') if isinstance(prof, dict) else None
+        usage_account = data.get('account_id')
+        return not (usage_account and profile_uuid and usage_account != profile_uuid)
 
     # Notifications
 
@@ -544,10 +570,15 @@ class UsageMonitorForCodex:
 
         extra = data.get('extra_usage') or {}
         if extra.get('is_enabled'):
+            # Only the legacy used/limit ratio model carries a spend amount and a
+            # monthly limit; a Codex credit BALANCE has neither, so don't emit
+            # ¥0/¥0 EXTRA_USED/EXTRA_LIMIT for it (matches docs/event-commands.md:
+            # these are not produced for Codex credit balances).
             limit = extra.get('monthly_limit', 0) or 0
-            used = extra.get('used_credits', 0) or 0
-            env_vars['USAGE_MONITOR_EXTRA_USED'] = format_credits(used)
-            env_vars['USAGE_MONITOR_EXTRA_LIMIT'] = format_credits(limit)
+            if limit > 0:
+                used = extra.get('used_credits', 0) or 0
+                env_vars['USAGE_MONITOR_EXTRA_USED'] = format_credits(used)
+                env_vars['USAGE_MONITOR_EXTRA_LIMIT'] = format_credits(limit)
 
         run_event_command(ON_STARTUP_COMMAND, env_vars)
 

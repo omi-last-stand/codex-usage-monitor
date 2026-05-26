@@ -2268,6 +2268,45 @@ class TestStartupCommand(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.run_event_command')
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_no_extra_usage_env_vars_for_credit_balance(self, _icon, _tooltip, mock_cmd):
+        """A Codex credit BALANCE (is_enabled but no monthly_limit) emits no legacy
+        EXTRA_USED / EXTRA_LIMIT vars - those belong to the used/limit ratio model
+        only (docs say they are not produced for credit balances)."""
+        data = {
+            'five_hour': {'utilization': 10.0},
+            'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250},
+        }
+        self.app.cache.update.return_value = UpdateResult(data=data)
+
+        self.app.update()
+
+        env = mock_cmd.call_args[0][1]
+        self.assertNotIn('USAGE_MONITOR_EXTRA_USED', env)
+        self.assertNotIn('USAGE_MONITOR_EXTRA_LIMIT', env)
+
+    @patch('usage_monitor_for_codex.app.ON_STARTUP_COMMAND', ['echo startup'])
+    @patch('usage_monitor_for_codex.app.run_event_command')
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_startup_deferred_on_recovery_account_mismatch(self, _icon, _tooltip, mock_cmd):
+        """On a session->api recovery whose live sample's account does NOT match
+        the refreshed profile (a mid-account-switch sample), the one-time startup
+        command is deferred rather than run with the mismatched sample's usage."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 50.0, 'resets_at': ''}, 'source': 'session'}),
+            UpdateResult(data={'five_hour': {'utilization': 91.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+        ]
+        self.app.update()  # session fallback
+        self.app.update()  # recovery api: usage acct-A but profile acct-B -> defer startup
+        mock_cmd.assert_not_called()
+        self.assertFalse(self.app._first_update_done)
+
+    @patch('usage_monitor_for_codex.app.ON_STARTUP_COMMAND', ['echo startup'])
+    @patch('usage_monitor_for_codex.app.run_event_command')
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
     def test_no_extra_usage_env_vars_when_disabled(self, _icon, _tooltip, mock_cmd):
         """Extra usage env vars are not emitted when extra_usage is disabled."""
         data = {
@@ -2429,6 +2468,18 @@ class TestSourceSwitchGuard(unittest.TestCase):
         self.app.update()  # api B@5 (same token, account_id changed) -> re-baseline, NOT a reset
         self.app.icon.notify.assert_not_called()
         self.assertEqual(self.app._prev_utilization, {'five_hour': 5.0})
+
+    def test_account_mismatch_live_sample_suppresses_events(self):
+        """A live sample whose stamped account differs from the displayed profile
+        (e.g. a switch landing mid-request) is re-baselined like an unverified
+        sample: no threshold/reset notification fires, even at high utilization."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}
+        self.app.cache.update.return_value = UpdateResult(
+            data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'},
+        )
+        self.app.update()  # usage acct-A @96% but profile acct-B -> mismatch -> suppressed
+        self.app.icon.notify.assert_not_called()
 
     def test_repeated_flapping_does_not_fire(self):
         """Every poll being a source switch suppresses alerts entirely (no spurious fire)."""

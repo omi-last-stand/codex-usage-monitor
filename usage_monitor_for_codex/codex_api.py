@@ -113,9 +113,31 @@ def read_account_id() -> str | None:
     return _read_tokens().get('account_id') or None
 
 
-def api_headers() -> dict[str, str] | None:
-    """Return auth headers for the Codex usage API, or ``None`` if no token."""
-    tokens = _read_tokens()
+def _jwt_account_id(tokens: dict[str, Any] | None = None) -> str | None:
+    """The token's own account id, decoded from the id-token JWT.
+
+    Used to stamp a usage result fetched WITHOUT an explicit ``ChatGPT-Account-Id``
+    header (the request then targets the token's default account), so every live
+    result still carries the account identity it was fetched for. Accepts a
+    pre-read ``tokens`` dict to share one credentials snapshot with the request.
+    """
+    if tokens is None:
+        tokens = _read_tokens()
+    claims = _decode_jwt_claims(tokens.get('id_token', ''))
+    auth = claims.get('https://api.openai.com/auth', {})
+    if isinstance(auth, dict):
+        return auth.get('chatgpt_account_id') or None
+    return None
+
+
+def api_headers(tokens: dict[str, Any] | None = None) -> dict[str, str] | None:
+    """Return auth headers for the Codex usage API, or ``None`` if no token.
+
+    Accepts a pre-read ``tokens`` dict so a caller can derive the headers and the
+    account stamp from one credentials snapshot (no torn read between them).
+    """
+    if tokens is None:
+        tokens = _read_tokens()
     token = tokens.get('access_token')
     if not token:
         return None
@@ -178,9 +200,18 @@ def fetch_usage() -> dict[str, Any]:
 
 def _fetch_usage_api() -> dict[str, Any]:
     """Fetch and transform rate limits from the live Codex usage API."""
-    headers = api_headers()
+    # Read credentials ONCE so the request token, the ChatGPT-Account-Id header,
+    # and the stamped account identity all come from the SAME snapshot. (A
+    # concurrent `codex login` between separate reads could otherwise stamp a
+    # different account than the token actually used.) Capturing before the
+    # request also means a switch landing mid-request leaves this stamp on the old
+    # account, so the post-request profile refresh differs and the popup hides
+    # account/Credits rather than misattributing them.
+    tokens = _read_tokens()
+    headers = api_headers(tokens)
     if not headers:
         return {'error': T['no_token']}
+    request_account_id = tokens.get('account_id') or _jwt_account_id(tokens)
 
     try:
         resp = requests.get(API_URL_USAGE, headers=headers, timeout=10)
@@ -220,13 +251,12 @@ def _fetch_usage_api() -> dict[str, Any]:
     if not _has_quota(result) and not result.get('extra_usage'):
         return {'error': T['no_usage_data']}
     result['source'] = 'api'
-    # Stamp the account this usage was actually fetched for (the id sent in the
-    # request), so the popup can show the account block / Credits only when they
+    # Stamp the account this usage was fetched for (captured above, before the
+    # request), so the popup shows the account block / Credits only when they
     # match the cached profile's account - never pairing one account's email with
-    # another's usage if `auth.json` changed mid-poll.
-    account_id = headers.get('ChatGPT-Account-Id')
-    if account_id:
-        result['account_id'] = account_id
+    # another's usage if `auth.json` changed mid-request.
+    if request_account_id:
+        result['account_id'] = request_account_id
     return result
 
 

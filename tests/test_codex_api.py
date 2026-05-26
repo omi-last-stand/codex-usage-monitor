@@ -229,11 +229,12 @@ class TestFetchUsageApi(unittest.TestCase):
         mock_get.assert_called_once_with(API_URL_USAGE, headers={'Authorization': 'Bearer test'}, timeout=10)
 
     @patch('usage_monitor_for_codex.codex_api.requests.get')
-    @patch('usage_monitor_for_codex.codex_api.api_headers',
-           return_value={'Authorization': 'Bearer test', 'ChatGPT-Account-Id': 'acct-A'})
-    def test_api_result_stamps_account_id(self, _mock_headers, mock_get):
-        """The api usage result carries the account_id it was fetched for, so the
-        UI can verify the displayed profile belongs to the same account."""
+    @patch('usage_monitor_for_codex.codex_api._read_tokens',
+           return_value={'access_token': 'T', 'account_id': 'acct-A'})
+    def test_api_result_stamps_account_id(self, _mock_tokens, mock_get):
+        """The api usage result carries the account_id it was fetched for (the
+        explicit ChatGPT-Account-Id), so the UI can verify the displayed profile
+        belongs to the same account."""
         mock_resp = MagicMock()
         mock_resp.json.return_value = {'rate_limits': CANONICAL_RATE_LIMITS}
         mock_get.return_value = mock_resp
@@ -241,6 +242,22 @@ class TestFetchUsageApi(unittest.TestCase):
         result = fetch_usage()
         self.assertEqual(result['source'], 'api')
         self.assertEqual(result['account_id'], 'acct-A')
+
+    @patch('usage_monitor_for_codex.codex_api._jwt_account_id', return_value='acct-jwt')
+    @patch('usage_monitor_for_codex.codex_api.requests.get')
+    @patch('usage_monitor_for_codex.codex_api._read_tokens', return_value={'access_token': 'T'})
+    def test_api_result_stamps_token_account_when_header_absent(self, _mock_tokens, mock_get, _mock_jwt):
+        """With no account_id (so no ChatGPT-Account-Id header), the result is still
+        stamped with the token's own account (id-token JWT), so every live result
+        carries the identity it was fetched for and a mid-request switch can be
+        detected."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {'rate_limits': CANONICAL_RATE_LIMITS}
+        mock_get.return_value = mock_resp
+
+        result = fetch_usage()
+        self.assertEqual(result['source'], 'api')
+        self.assertEqual(result['account_id'], 'acct-jwt')
 
     @patch('usage_monitor_for_codex.codex_api.requests.get')
     @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
