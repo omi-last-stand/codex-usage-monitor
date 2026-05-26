@@ -26,6 +26,7 @@
     "quit": "Quitter",
     "autostart": "Lancer avec Windows",
     "restart": "Redémarrer",
+    "show_widget": "Afficher le widget",
     "test_commands": "Tester les commandes d'événements",
     "test_reset_5h": "Reset (5 heures)",
     "test_reset_7d": "Reset (hebdomadaire)",

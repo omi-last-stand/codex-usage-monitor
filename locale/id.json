@@ -26,6 +26,7 @@
     "quit": "Keluar",
     "autostart": "Mulai dengan Windows",
     "restart": "Mulai Ulang",
+    "show_widget": "Tampilkan widget",
     "test_commands": "Uji perintah event",
     "test_reset_5h": "Reset (5-jam)",
     "test_reset_7d": "Reset (mingguan)",

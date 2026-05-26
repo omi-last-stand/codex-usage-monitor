@@ -25,7 +25,7 @@ from .idle import get_idle_seconds, is_workstation_locked
 from .settings import (
     ALERT_TIME_AWARE, ALERT_TIME_AWARE_BELOW, IDLE_PAUSE,
     ON_RESET_COMMAND, ON_STARTUP_COMMAND, ON_THRESHOLD_COMMAND,
-    POLL_ERROR, POLL_FAST, POLL_FAST_EXTRA, POLL_INTERVAL, TOOLTIP_FIELDS, get_alert_thresholds,
+    POLL_ERROR, POLL_FAST, POLL_FAST_EXTRA, POLL_INTERVAL, TOOLTIP_FIELDS, USAGE_SOURCE, get_alert_thresholds,
 )
 from .formatting import elapsed_pct, field_period, format_credits, format_tooltip, parse_field_name, popup_label
 from .i18n import T
@@ -80,6 +80,9 @@ class UsageMonitorForCodex:
             icon=load_tray_icon(),
             title=T['loading'],
             menu=pystray.Menu(
+                # default=True: left-clicking the tray icon reopens the widget,
+                # so closing it (the X button) is never a dead end.
+                pystray.MenuItem(T['show_widget'], self.on_show_popup, default=True),
                 pystray.MenuItem(T['settings_title'], self.on_open_settings),
                 pystray.MenuItem(T['about_title'], self.on_about),
                 pystray.Menu.SEPARATOR,
@@ -713,7 +716,10 @@ class UsageMonitorForCodex:
             icon.visible = True
             if getattr(sys, 'frozen', False):
                 sync_autostart_path()
-            if not api_headers():
+            # Only warn about missing credentials when the live API is actually
+            # used. In explicit session mode the app reads local rollout files and
+            # needs no token, so a "run codex login" warning would be a false alarm.
+            if USAGE_SOURCE != 'session' and not api_headers():
                 icon.notify(f"{T['warn_no_token']}\n{T['warn_login']}", T['popup_title'])
             self.on_show_popup()
             self.poll_loop()

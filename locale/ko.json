@@ -26,6 +26,7 @@
     "quit": "종료",
     "autostart": "Windows 시작 시 실행",
     "restart": "다시 시작",
+    "show_widget": "위젯 표시",
     "test_commands": "이벤트 명령 테스트",
     "test_reset_5h": "리셋 (5시간)",
     "test_reset_7d": "리셋 (주간)",

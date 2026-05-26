@@ -173,4 +173,4 @@ Each usage bar is drawn as a gradient from `bar_fg_start` to `bar_fg`. Set both 
 
 The monitor runs as a resident, always-on-top desktop widget. Click it to toggle the compact/expanded view; right-click for its menu (always on top, settings, about, quit).
 
-Which blocks appear - the account row, each usage bar, the extra-usage bar, the Codex CLI version, and the status line - and their order are chosen in the widget's **Settings** window (show / collapse / hide, with drag-to-reorder), not in this JSON file. The window position, the always-on-top state, the compact/expanded view, and that per-block configuration are saved to `CodexUsageMonitor.ini` next to the EXE.
+Which blocks appear - the account row, each usage bar, the credits line, the Codex CLI version, and the status line - and their order are chosen in the widget's **Settings** window (show / collapse / hide, with drag-to-reorder), not in this JSON file. The window position, the always-on-top state, the compact/expanded view, and that per-block configuration are saved to `CodexUsageMonitor.ini` next to the EXE.

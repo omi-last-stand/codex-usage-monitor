@@ -26,6 +26,7 @@
     "quit": "終了",
     "autostart": "Windows起動時に開始",
     "restart": "再起動",
+    "show_widget": "ウィジェットを表示",
     "test_commands": "イベントコマンドをテスト",
     "test_reset_5h": "リセット (5時間)",
     "test_reset_7d": "リセット (週間)",

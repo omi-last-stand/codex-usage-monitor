@@ -17,7 +17,7 @@ Initial release of Codex Usage Monitor, adapted from Claude Usage Monitor for Op
 
 ### Added
 
-- Resident, always-on-top desktop widget plus system-tray icon showing your Codex primary (rolling 5-hour) and secondary (weekly / 7-day) rate-limit usage, with an optional extra-usage bar for a credits balance
+- Resident, always-on-top desktop widget plus system-tray icon showing your Codex primary (rolling 5-hour) and secondary (weekly / 7-day) rate-limit usage, with an optional credits line for a credits balance
 - Reads Codex CLI OAuth credentials from `~/.codex/auth.json` (honoring `CODEX_HOME`); the access token and account id are used only in HTTP headers
 - Polls the live API `GET https://chatgpt.com/backend-api/wham/usage` - the same endpoint the Codex CLI uses for its `/status` rate limits
 - Falls back to the newest local session rollout file (`~/.codex/sessions/.../rollout-*.jsonl`) when the API is unavailable, needing no network and no token
@@ -26,7 +26,7 @@ Initial release of Codex Usage Monitor, adapted from Claude Usage Monitor for Op
 - Codex blue-to-violet theme, with a new `bar_fg_start` color key for the usage-bar gradient start
 - Compact view with click-to-expand and drag-to-move; the window position and the compact/expanded view are remembered and restored next launch (off-screen coordinates are auto-corrected; the first run opens centered and compact)
 - Right-click widget menu: always-on-top toggle, settings, about, quit
-- Settings window to choose which blocks are shown and in what order - the account row, each usage bar, the extra-usage bar, the Codex CLI version, and the status line - each with show / collapse (shown only when expanded) / hide and drag-to-reorder
+- Settings window to choose which blocks are shown and in what order - the account row, each usage bar, the credits line, the Codex CLI version, and the status line - each with show / collapse (shown only when expanded) / hide and drag-to-reorder
 - Language selector in the settings window (system default plus all 13 languages); the app restarts automatically to apply the new language
 - Smart, time-aware threshold alerts and reset notifications; adaptive polling (faster while active, paused while idle or locked); event commands (run a command on reset, threshold, or startup)
 - About dialog with clickable links (a native Win32 task dialog)

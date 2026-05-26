@@ -26,6 +26,7 @@
     "quit": "बंद करें",
     "autostart": "Windows के साथ शुरू करें",
     "restart": "पुनः आरंभ करें",
+    "show_widget": "विजेट दिखाएँ",
     "test_commands": "इवेंट कमांड परीक्षण",
     "test_reset_5h": "रीसेट (5-घंटा)",
     "test_reset_7d": "रीसेट (साप्ताहिक)",

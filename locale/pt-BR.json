@@ -26,6 +26,7 @@
     "quit": "Sair",
     "autostart": "Iniciar com o Windows",
     "restart": "Reiniciar",
+    "show_widget": "Mostrar widget",
     "test_commands": "Testar comandos de eventos",
     "test_reset_5h": "Reset (5 horas)",
     "test_reset_7d": "Reset (semanal)",

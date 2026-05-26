@@ -449,6 +449,7 @@ class UsagePopup:
         self._running = True
         self._closed = threading.Event()
         self._popup_hwnd = 0
+        self._hook_thread_id = 0
         initial_height = 400
         self._last_height = initial_height
         snap = app.cache.snapshot
@@ -526,7 +527,13 @@ class UsagePopup:
         the window bounds and dismisses the right-click menu.  The widget is
         never closed or collapsed.  The dismiss runs on a worker thread so the
         hook callback stays fast.
+
+        The thread blocks in ``GetMessageW`` to pump the low-level hook; closing
+        the widget posts ``WM_QUIT`` to this thread (``_wake_hook_thread``) so the
+        loop ends and ``UnhookWindowsHookEx`` runs - otherwise reopening the
+        widget would leak a global hook on every open/close cycle.
         """
+        self._hook_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         _call_next = ctypes.windll.user32.CallNextHookEx
         _call_next.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]
         _call_next.restype = ctypes.c_long
@@ -556,13 +563,32 @@ class UsagePopup:
                 pass
         finally:
             ctypes.windll.user32.UnhookWindowsHookEx(mouse_hook)
+            # Cleared so a late wake from the other close path can't post to this
+            # (now-terminated, possibly-recycled) thread id.
+            self._hook_thread_id = 0
+
+    def _wake_hook_thread(self) -> None:
+        """Wake the mouse-hook thread (blocked in GetMessageW) so it unhooks and exits.
+
+        Single-shot: the id is claimed and cleared in one step so a second close
+        path can't post ``WM_QUIT`` to a stale id after the thread exited (Windows
+        may recycle thread ids). The post only ever targets the still-live hook
+        thread - it cannot exit until it receives this very ``WM_QUIT``.
+        """
+        tid, self._hook_thread_id = self._hook_thread_id, 0
+        if tid:
+            # WM_QUIT (0x0012) makes the thread's GetMessageW return 0, ending the
+            # hook loop so UnhookWindowsHookEx runs in the finally.
+            ctypes.windll.user32.PostThreadMessageW(tid, 0x0012, 0, 0)
 
     def _on_window_closed(self) -> None:
         self._running = False
+        self._wake_hook_thread()
         self._closed.set()
 
     def _close(self) -> None:
         self._running = False
+        self._wake_hook_thread()
         try:
             self._window.destroy()
         except Exception:

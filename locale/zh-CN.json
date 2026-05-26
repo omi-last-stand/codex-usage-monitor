@@ -26,6 +26,7 @@
     "quit": "退出",
     "autostart": "开机自启动",
     "restart": "重新启动",
+    "show_widget": "显示小组件",
     "test_commands": "测试事件命令",
     "test_reset_5h": "重置 (5小时)",
     "test_reset_7d": "重置 (每周)",

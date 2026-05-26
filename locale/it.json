@@ -26,6 +26,7 @@
     "quit": "Esci",
     "autostart": "Avvia con Windows",
     "restart": "Riavvia",
+    "show_widget": "Mostra widget",
     "test_commands": "Testa comandi eventi",
     "test_reset_5h": "Reset (5 ore)",
     "test_reset_7d": "Reset (settimanale)",
