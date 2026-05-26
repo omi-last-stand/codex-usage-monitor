@@ -72,14 +72,15 @@ def popup_data(lang: str) -> dict:
              'warn': True, 'reset_text': RESET[lang]['seven_day'],
              'midnights': [0.143, 0.286, 0.429, 0.571, 0.714, 0.857], 'marker_rel': 0.55},
         ],
-        'extra': {'pct_text': '23%', 'fill_pct': 0.23, 'spent_text': SPENT[lang]},
+        # No CREDITS bar: a Plus/Pro account returns rate_limits.credits=null,
+        # so the typical widget shows only the 5h + weekly bars (matches the demo GIF).
+        'extra': None,
         'installations': [{'name': 'CLI', 'version': '0.5.0'}, {'name': 'VS Code', 'version': '0.5.0'}],
         'status': {'text': UPDATED[lang], 'is_error': False},
         'layout': [
             {'key': 'account', 'state': 'collapsed'},
             {'key': 'five_hour', 'state': 'visible'},
             {'key': 'seven_day', 'state': 'visible'},
-            {'key': 'extra_usage', 'state': 'collapsed'},
             {'key': 'installations', 'state': 'collapsed'},
             {'key': 'status', 'state': 'collapsed'},
         ],
@@ -101,7 +102,6 @@ def settings_fields(lang: str, L: dict) -> list:
         {'key': 'account', 'label': L['account'], 'state': 'collapsed'},
         {'key': 'five_hour', 'label': LABELS[lang]['five_hour'], 'state': 'visible'},
         {'key': 'seven_day', 'label': LABELS[lang]['seven_day'], 'state': 'visible'},
-        {'key': 'extra_usage', 'label': L['extra_usage'], 'state': 'collapsed'},
         {'key': 'installations', 'label': L['claude_code'], 'state': 'collapsed'},
         {'key': 'status', 'label': L['status_label'], 'state': 'collapsed'},
     ]
