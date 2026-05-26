@@ -153,9 +153,18 @@ function updateData(data) {
     reconcileBars(data.usage || []);
 
     if (data.extra) {
-        els.extraSpent.textContent = data.extra.spent_text;
-        els.extraPct.textContent = data.extra.pct_text;
-        els.extraFill.style.width = `${data.extra.fill_pct * 100}%`;
+        const extraBar = els.extraFill.parentElement;
+        if (data.extra.mode === 'text') {
+            // Codex credits: a balance / "Unlimited" line, not a ratio bar.
+            els.extraSpent.textContent = data.extra.text;
+            els.extraPct.textContent = '';
+            extraBar.style.display = 'none';
+        } else {
+            els.extraSpent.textContent = data.extra.spent_text;
+            els.extraPct.textContent = data.extra.pct_text;
+            extraBar.style.display = '';
+            els.extraFill.style.width = `${data.extra.fill_pct * 100}%`;
+        }
     }
 
     if (data.installations?.length) {

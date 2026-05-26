@@ -421,6 +421,24 @@ class TestSnapshotToDict(unittest.TestCase):
         self.assertIn('$25.00', extra['spent_text'])
         self.assertIn('$100.00', extra['spent_text'])
 
+    def test_extra_usage_credits_balance(self):
+        """A Codex credits balance renders as a text line, not a ratio bar."""
+        usage = {'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}}
+        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        extra = result['extra']
+        self.assertIsNotNone(extra)
+        self.assertEqual(extra['mode'], 'text')
+        self.assertIn('1,250', extra['text'])
+
+    def test_extra_usage_credits_unlimited(self):
+        """Unlimited credits render as a text line."""
+        usage = {'extra_usage': {'is_enabled': True, 'unlimited': True, 'balance': None}}
+        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        extra = result['extra']
+        self.assertIsNotNone(extra)
+        self.assertEqual(extra['mode'], 'text')
+        self.assertTrue(extra['text'])
+
     @patch('usage_monitor_for_codex.popup.format_credits', side_effect=lambda c: f'${c / 100:.2f}')
     def test_extra_usage_fill_clamped(self, _mock_credits):
         """Extra usage fill is clamped to 1.0 when over limit."""

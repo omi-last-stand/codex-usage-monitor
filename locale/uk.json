@@ -77,5 +77,7 @@
     "status_updated_s": "Оновлено {s}с тому",
     "status_next_update": "Наступне оновлення через {duration}",
     "status_refreshing": "Оновлення...",
-    "already_running": "Codex Usage Monitor v{running_version} вже запущено.\n\nБажаєте замінити запущений екземпляр?"
+    "already_running": "Codex Usage Monitor v{running_version} вже запущено.\n\nБажаєте замінити запущений екземпляр?",
+    "credits_unlimited": "Необмежено",
+    "credits_remaining": "Залишок: {balance} кредитів"
 }

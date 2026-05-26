@@ -15,7 +15,7 @@ from .i18n import T
 from .settings import CURRENCY_SYMBOL, TOOLTIP_FIELDS, _SYSTEM_CURRENCY_SYMBOL
 
 __all__ = [
-    'elapsed_pct', 'expand_popup_fields', 'field_period', 'format_credits', 'format_tooltip',
+    'elapsed_pct', 'expand_popup_fields', 'field_period', 'format_balance', 'format_credits', 'format_tooltip',
     'midnight_positions', 'parse_field_name', 'popup_label', 'time_until', 'tooltip_label',
 ]
 
@@ -327,6 +327,23 @@ def format_credits(cents: float) -> str:
         if CURRENCY_SYMBOL:
             return f'{CURRENCY_SYMBOL}\u00a0{amount:.2f}'
         return f'{amount:.2f}'
+
+
+def format_balance(balance: Any) -> str:
+    """Format a Codex credit balance for display (no currency symbol).
+
+    The balance arrives as a string or number (the Codex ``CreditsSnapshot``
+    types it as ``string | null``).  Render an integer with thousands
+    separators, a fractional value with up to two decimals, and fall back to
+    the raw text for anything non-numeric.
+    """
+    try:
+        amount = float(str(balance).replace(',', '').strip())
+    except (TypeError, ValueError):
+        return str(balance)
+    if amount == int(amount):
+        return f'{int(amount):,}'
+    return f'{amount:,.2f}'
 
 
 def format_tooltip(data: dict[str, Any]) -> str:

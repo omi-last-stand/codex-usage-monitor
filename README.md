@@ -49,13 +49,13 @@ Codex CLI・ChatGPT デスクトップ・各IDE拡張で共有される Codex �
 - **コンパクト表示／クリックで展開**：通常は使用量バーだけをコンパクトに表示。クリックすると詳細（アカウント・隠し項目・更新状況など）が開きます
 - **位置と表示状態を記憶**：ウィンドウ位置と、コンパクト/拡大のどちらで使っていたかを `CodexUsageMonitor.ini` に保存し、次回起動時に復元。ドラッグで自由に移動でき、画面外の座標は自動で見える位置に補正。初回はなければ画面中央にコンパクトで表示
 - **右クリックメニュー**：常に前面に表示（切替）／設定／バージョン情報／終了
-- **設定ウィンドウ**：表示するブロック（アカウント・各使用量バー・追加利用・Codex CLIバージョン・更新状況）を「表示／隠す／非表示」の3状態で選び、ドラッグで並べ替え。結果は ini に保存
+- **設定ウィンドウ**：表示するブロック（アカウント・各使用量バー・クレジット・Codex CLIバージョン・更新状況）を「表示／隠す／非表示」の3状態で選び、ドラッグで並べ替え。結果は ini に保存
 - **レジストリ不使用**：設定・状態はすべて exe と同じフォルダのファイルに保存します
 - **バージョン情報**：クリック可能なリンク付き（タスクダイアログ）
 
 ### 主な機能
 
-- 使用量バー：Codex の**主要枠**（ローリング5時間）と**週次枠**（7日間）を表示。クレジット残高がある場合は「追加利用」バーも表示
+- 使用量バー：Codex の**主要枠**（ローリング5時間）と**週次枠**（7日間）を表示。クレジット残高がある場合は残高（または「無制限」）を**テキストで表示**
 - しきい値アラート（経過時間を考慮するスマートモード対応）・リセット通知
 - 2つのデータソース：ライブAPI（`chatgpt.com`）と、ネットワーク不要のローカルセッションファイル。`usage_source` で切替可能
 - 状況に応じた適応的ポーリング（アクティブ時は高頻度、アイドル／ロック時は休止）
@@ -189,13 +189,13 @@ Codex Usage Monitor shows your OpenAI Codex (ChatGPT-plan) rate-limit usage on t
 - **Compact view / click to expand** — normally shows just the usage bars; click to reveal the details (account, collapsed items, status, …).
 - **Remembers its position and view** — the window position and whether you left it compact or expanded are saved to `CodexUsageMonitor.ini` and restored next launch. Drag it anywhere; off-screen coordinates are auto-corrected to a visible spot; the first run with no INI opens centered and compact.
 - **Right-click menu** — Always on top (toggle) / Settings / About / Quit.
-- **Settings window** — choose which blocks to show and in what order (the account row, each usage bar, the extra-usage bar, the Codex CLI version, the status line) with a three-state control (show / collapse / hide) and drag-to-reorder; saved to the INI.
+- **Settings window** — choose which blocks to show and in what order (the account row, each usage bar, the credits line, the Codex CLI version, the status line) with a three-state control (show / collapse / hide) and drag-to-reorder; saved to the INI.
 - **No registry** — all settings and state live in files next to the EXE.
 - **About dialog** with clickable links (a native task dialog).
 
 ### What it shows
 
-- Usage bars for Codex's **primary** window (a rolling 5-hour limit) and **secondary** window (weekly / 7-day). When your plan carries a credits balance, an optional **extra-usage** bar is shown too.
+- Usage bars for Codex's **primary** window (a rolling 5-hour limit) and **secondary** window (weekly / 7-day). When your account carries a Codex credits balance, it is shown too — the remaining balance (or "Unlimited") as a text line.
 - Smart, time-aware threshold alerts and reset notifications.
 - Two data sources — the live API (`chatgpt.com`) and zero-network local session files — switchable with `usage_source`.
 - Adaptive polling (faster while active, paused while idle or locked).

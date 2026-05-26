@@ -749,5 +749,48 @@ class TestParseRetryAfter(unittest.TestCase):
         self.assertIsNone(_parse_retry_after(resp))
 
 
+class TestCreditsTransform(unittest.TestCase):
+    """transform_rate_limits maps the real Codex CreditsSnapshot to extra_usage.
+
+    The real shape is {has_credits, unlimited, balance(string|null)} - a credit
+    balance, not a used/limit ratio.
+    """
+
+    def _extra(self, credits):
+        rl = {'primary': {'used_percent': 4, 'window_minutes': 300, 'resets_at': 1779754106}, 'credits': credits}
+        return transform_rate_limits(rl).get('extra_usage')
+
+    def test_null_credits_no_extra(self):
+        self.assertIsNone(self._extra(None))
+
+    def test_no_balance_no_extra(self):
+        self.assertIsNone(self._extra({'has_credits': False, 'unlimited': False, 'balance': None}))
+
+    def test_unlimited(self):
+        self.assertEqual(self._extra({'has_credits': True, 'unlimited': True, 'balance': None}),
+                         {'is_enabled': True, 'unlimited': True, 'balance': None})
+
+    def test_balance_string(self):
+        self.assertEqual(self._extra({'has_credits': True, 'unlimited': False, 'balance': '1250'}),
+                         {'is_enabled': True, 'unlimited': False, 'balance': '1250'})
+
+    def test_balance_number(self):
+        self.assertEqual(self._extra({'has_credits': True, 'unlimited': False, 'balance': 1250}),
+                         {'is_enabled': True, 'unlimited': False, 'balance': 1250})
+
+    def test_balance_zero_is_shown(self):
+        self.assertEqual(self._extra({'has_credits': True, 'unlimited': False, 'balance': 0}),
+                         {'is_enabled': True, 'unlimited': False, 'balance': 0})
+
+    def test_empty_balance_no_extra(self):
+        self.assertIsNone(self._extra({'has_credits': True, 'unlimited': False, 'balance': ''}))
+
+    def test_bool_balance_no_extra(self):
+        self.assertIsNone(self._extra({'has_credits': True, 'balance': True}))
+
+    def test_non_dict_credits_no_extra(self):
+        self.assertIsNone(self._extra('nope'))
+
+
 if __name__ == '__main__':
     unittest.main()

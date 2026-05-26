@@ -77,5 +77,7 @@
     "status_updated_s": "{s}s पहले अपडेट किया गया",
     "status_next_update": "अगला अपडेट {duration} में",
     "status_refreshing": "रीफ़्रेश हो रहा है...",
-    "already_running": "Codex Usage Monitor v{running_version} पहले से चल रहा है।\n\nक्या आप चल रही प्रति को बदलना चाहते हैं?"
+    "already_running": "Codex Usage Monitor v{running_version} पहले से चल रहा है।\n\nक्या आप चल रही प्रति को बदलना चाहते हैं?",
+    "credits_unlimited": "असीमित",
+    "credits_remaining": "{balance} क्रेडिट शेष"
 }

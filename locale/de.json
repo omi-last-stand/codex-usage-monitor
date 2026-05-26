@@ -77,5 +77,7 @@
     "status_updated_s": "Aktualisiert vor {s}s",
     "status_next_update": "Nächstes Update in {duration}",
     "status_refreshing": "Aktualisiere...",
-    "already_running": "Codex Usage Monitor v{running_version} wird bereits ausgeführt.\n\nMöchten Sie die laufende Instanz ersetzen?"
+    "already_running": "Codex Usage Monitor v{running_version} wird bereits ausgeführt.\n\nMöchten Sie die laufende Instanz ersetzen?",
+    "credits_unlimited": "Unbegrenzt",
+    "credits_remaining": "{balance} Credits übrig"
 }

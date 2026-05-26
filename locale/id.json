@@ -77,5 +77,7 @@
     "status_updated_s": "Diperbarui {s}d yang lalu",
     "status_next_update": "Pembaruan berikutnya dalam {duration}",
     "status_refreshing": "Memperbarui...",
-    "already_running": "Codex Usage Monitor v{running_version} sudah berjalan.\n\nApakah Anda ingin mengganti instans yang sedang berjalan?"
+    "already_running": "Codex Usage Monitor v{running_version} sudah berjalan.\n\nApakah Anda ingin mengganti instans yang sedang berjalan?",
+    "credits_unlimited": "Tak terbatas",
+    "credits_remaining": "Sisa {balance} kredit"
 }

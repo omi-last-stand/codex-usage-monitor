@@ -77,5 +77,7 @@
     "status_updated_s": "Actualizado hace {s}s",
     "status_next_update": "Próxima actualización en {duration}",
     "status_refreshing": "Actualizando...",
-    "already_running": "Codex Usage Monitor v{running_version} ya se está ejecutando.\n\n¿Desea reemplazar la instancia en ejecución?"
+    "already_running": "Codex Usage Monitor v{running_version} ya se está ejecutando.\n\n¿Desea reemplazar la instancia en ejecución?",
+    "credits_unlimited": "Ilimitado",
+    "credits_remaining": "{balance} créditos restantes"
 }

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from usage_monitor_for_codex.formatting import (
     PERIOD_5H, PERIOD_7D,
-    elapsed_pct, expand_popup_fields, field_period, format_credits, format_tooltip,
+    elapsed_pct, expand_popup_fields, field_period, format_balance, format_credits, format_tooltip,
     midnight_positions, parse_field_name, popup_label, time_until, tooltip_label,
 )
 from usage_monitor_for_codex.i18n import LOCALE_DIR
@@ -864,6 +864,28 @@ class TestFormatCredits(unittest.TestCase):
     def test_zero_cents(self, mock_currency):
         """Zero cents formats correctly."""
         self.assertEqual(format_credits(0.0), '$0.00')
+
+
+class TestFormatBalance(unittest.TestCase):
+    """Tests for format_balance() (Codex credit balance, no currency symbol)."""
+
+    def test_integer(self):
+        self.assertEqual(format_balance(1250), '1,250')
+
+    def test_numeric_string(self):
+        self.assertEqual(format_balance('1250'), '1,250')
+
+    def test_string_with_commas(self):
+        self.assertEqual(format_balance('1,250'), '1,250')
+
+    def test_fractional(self):
+        self.assertEqual(format_balance(1250.5), '1,250.50')
+
+    def test_zero(self):
+        self.assertEqual(format_balance(0), '0')
+
+    def test_non_numeric_falls_back_to_raw(self):
+        self.assertEqual(format_balance('many'), 'many')
 
 
 if __name__ == '__main__':

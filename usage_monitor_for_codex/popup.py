@@ -21,7 +21,7 @@ import webview  # type: ignore[import-untyped]  # no type stubs available
 
 from . import __version__
 from .codex_cli import CHANGELOG_URL, find_installations
-from .formatting import elapsed_pct, expand_popup_fields, field_period, format_credits, midnight_positions, popup_label, time_until
+from .formatting import elapsed_pct, expand_popup_fields, field_period, format_balance, format_credits, midnight_positions, popup_label, time_until
 from .i18n import T
 from .settings import BAR_BG, BAR_DIVIDER, BAR_FG, BAR_FG_START, BAR_FG_WARN, BAR_MARKER, BG, BG2, FG, FG_DIM, FG_HEADING, FG_LINK, POPUP_FIELDS
 from .task_dialog import show_info_dialog
@@ -234,22 +234,31 @@ def _snapshot_to_dict(
                 'marker_rel': marker_rel,
             })
 
-    # Extra usage
+    # Extra usage / Codex credits.
+    # Codex credits are a *balance* (or "unlimited"), shown as a text line.
+    # The legacy used/monthly_limit ratio bar is kept as a fallback for any
+    # future payload that carries a spend limit.
     extra = None
     if snap.usage:
         extra_data = snap.usage.get('extra_usage')
         if extra_data and extra_data.get('is_enabled'):
-            limit = extra_data.get('monthly_limit', 0) or 0
-            if limit > 0:
-                used = extra_data.get('used_credits', 0) or 0
-                pct = used / limit * 100
-                extra = {
-                    'pct_text': f'{pct:.0f}%',
-                    'fill_pct': max(0.0, min(1.0, pct / 100)),
-                    'spent_text': T['extra_usage_spent'].format(
-                        used=format_credits(used), limit=format_credits(limit),
-                    ),
-                }
+            if extra_data.get('unlimited'):
+                extra = {'mode': 'text', 'text': T['credits_unlimited']}
+            elif extra_data.get('balance') is not None:
+                extra = {'mode': 'text', 'text': T['credits_remaining'].format(balance=format_balance(extra_data['balance']))}
+            else:
+                limit = extra_data.get('monthly_limit', 0) or 0
+                if limit > 0:
+                    used = extra_data.get('used_credits', 0) or 0
+                    pct = used / limit * 100
+                    extra = {
+                        'mode': 'bar',
+                        'pct_text': f'{pct:.0f}%',
+                        'fill_pct': max(0.0, min(1.0, pct / 100)),
+                        'spent_text': T['extra_usage_spent'].format(
+                            used=format_credits(used), limit=format_credits(limit),
+                        ),
+                    }
 
     # Installations
     if installations is None:

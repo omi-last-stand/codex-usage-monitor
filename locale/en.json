@@ -38,7 +38,15 @@
     "duration_hm": "{h}h {m}m",
     "duration_m": "{m}m",
     "duration_s": "{s}s",
-    "weekdays": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    "weekdays": [
+        "Mon",
+        "Tue",
+        "Wed",
+        "Thu",
+        "Fri",
+        "Sat",
+        "Sun"
+    ],
     "loading": "Codex Usage Monitor: Loading...",
     "error_label": "Codex Usage Monitor: Error",
     "connection_error": "Could not connect to ChatGPT (chatgpt.com).",
@@ -69,5 +77,7 @@
     "status_updated_s": "Updated {s}s ago",
     "status_next_update": "Next update in {duration}",
     "status_refreshing": "Refreshing...",
-    "already_running": "Codex Usage Monitor v{running_version} is already running.\n\nDo you want to replace the running instance?"
+    "already_running": "Codex Usage Monitor v{running_version} is already running.\n\nDo you want to replace the running instance?",
+    "credits_unlimited": "Unlimited",
+    "credits_remaining": "{balance} credits remaining"
 }

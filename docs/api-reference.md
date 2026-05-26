@@ -101,15 +101,23 @@ Each entry carries `utilization` (from `used_percent`) and an ISO-8601 `resets_a
 
 ### Extra usage (credits)
 
-When `rate_limits.credits` is present and usable, it is mapped to an `extra_usage` entry the popup renders as a separate bar:
+The Codex `rate_limits.credits` field is a `CreditsSnapshot` — `{ "has_credits": bool, "unlimited": bool, "balance": string | null }`:
 
 ```json
-{
-  "extra_usage": { "is_enabled": true, "used_credits": 250.0, "monthly_limit": 1000.0 }
-}
+{ "has_credits": true, "unlimited": false, "balance": "1250" }
 ```
 
-The app reads `used_credits` (or `used`) and `total_credits` (or `total` / `monthly_limit`). If no usable limit is found, no extra-usage bar is shown.
+It is mapped to an `extra_usage` entry the popup renders as a **balance line** (not a percentage bar):
+
+```json
+{ "extra_usage": { "is_enabled": true, "unlimited": false, "balance": "1250" } }
+```
+
+- `unlimited: true` → shows "Unlimited".
+- a non-null `balance` → shows the remaining balance (e.g. "1,250 credits remaining").
+- `credits: null`, `has_credits: false`, or a null/empty `balance` → the Credits row is hidden.
+
+Codex credits are a *balance*, so there is no spend percentage and no `$` conversion (the value is shown as a credit count), and the threshold alerts that apply to the time-window quotas do not apply here.
 
 ## Session-file fallback — `~/.codex/sessions/.../rollout-*.jsonl`
 

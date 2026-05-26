@@ -77,5 +77,7 @@
     "status_updated_s": "{s}秒前更新",
     "status_next_update": "{duration}後更新",
     "status_refreshing": "重新整理中...",
-    "already_running": "Codex Usage Monitor v{running_version} 已在執行中。\n\n是否要取代正在執行的執行個體？"
+    "already_running": "Codex Usage Monitor v{running_version} 已在執行中。\n\n是否要取代正在執行的執行個體？",
+    "credits_unlimited": "無限制",
+    "credits_remaining": "剩餘 {balance} 點數"
 }

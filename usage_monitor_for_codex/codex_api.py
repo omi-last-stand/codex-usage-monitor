@@ -362,35 +362,28 @@ def _iso_from_window(window: dict[str, Any]) -> str:
 
 
 def _credits_to_extra_usage(credits: Any) -> dict[str, Any] | None:
-    """Best-effort map a Codex ``credits`` object to the extra-usage model.
+    """Map a Codex ``credits`` snapshot to the internal extra-usage model.
 
-    The credits shape is only populated on some plans and is not always
-    present; map conservatively and return ``None`` when nothing usable is
-    found so no empty bar is shown.
+    The real Codex ``CreditsSnapshot`` is ``{has_credits, unlimited, balance}``
+    (snake_case in the wham/session payload; ``balance`` is a string or null).
+    It is a *credit balance*, not a spend-vs-limit ratio, so it is surfaced as
+    a balance / unlimited display rather than a percentage bar.
+
+    Returns ``None`` (no CREDITS row) when credits are absent, disabled, or the
+    balance is unknown - e.g. ``{has_credits: false, unlimited: false,
+    balance: null}`` on an account without purchased credits.
     """
     if not isinstance(credits, dict):
         return None
 
-    # used credits (in the same minor unit the formatter expects: cents)
-    used = credits.get('used_credits')
-    if used is None:
-        used = credits.get('used')
-    limit = credits.get('total_credits')
-    if limit is None:
-        limit = credits.get('total')
-    if limit is None:
-        limit = credits.get('monthly_limit')
+    if credits.get('unlimited'):
+        return {'is_enabled': True, 'unlimited': True, 'balance': None}
 
-    try:
-        used_val = float(used) if used is not None else None
-        limit_val = float(limit) if limit is not None else None
-    except (TypeError, ValueError):
+    balance = credits.get('balance')
+    if balance is None or balance == '' or isinstance(balance, bool) or not isinstance(balance, (str, int, float)):
         return None
 
-    if not limit_val or limit_val <= 0 or used_val is None:
-        return None
-
-    return {'is_enabled': True, 'used_credits': used_val, 'monthly_limit': limit_val}
+    return {'is_enabled': True, 'unlimited': False, 'balance': balance}
 
 
 def _has_quota(data: dict[str, Any]) -> bool:
