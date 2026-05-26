@@ -270,6 +270,52 @@ class UsageMonitorForCodex:
 
     # Update orchestration
 
+    def _is_in_period_dip(self, key: str, data: dict[str, Any], now: datetime) -> bool:
+        """Return True when ``key``'s utilization change is a dip WITHIN the current
+        active period rather than a GENUINE reset.
+
+        Reset events (the reset notification and ``on_reset_command``) must fire only on
+        a genuine reset - the quota period actually ended - never on a rolling-window
+        dip while the same period is still active (docs/event-commands.md). The signal
+        for "still the same active period" is the reset deadline: the window is present
+        in this verified response under (essentially) the SAME reset deadline as the
+        retained trusted entry, and that deadline is still in the future. Everything
+        else is a genuine reset and is NOT a dip:
+          - the window VANISHED (absent -> no current resets_at);
+          - its deadline ADVANCED to a new period (a reset moves it forward by at least
+            a full window, >= 5h);
+          - the retained deadline has already PASSED (overdue; the server may lag,
+            still reporting the old deadline, but the period has ended).
+        When no trusted retained deadline is available the period cannot be classified,
+        so this returns False (a drop is treated as a reset, the prior behaviour).
+
+        Deadlines are compared with a tolerance rather than by exact string equality:
+        ``transform_rate_limits`` may derive ``resets_at`` from a RELATIVE countdown
+        (``resets_in_seconds`` etc.) as ``now + delta``, which yields a slightly
+        different absolute string each poll within the same period. The tolerance
+        (seconds-scale jitter) is far below a genuine reset's forward jump (a whole
+        window), so both an absolute (byte-identical) and a relative (drifting)
+        deadline are classified correctly."""
+        retained_entry = self._prev_entries.get(key)
+        retained_rs = retained_entry.get('resets_at') if isinstance(retained_entry, dict) else None
+        current_entry = data.get(key)
+        current_rs = current_entry.get('resets_at') if isinstance(current_entry, dict) else None
+        if not retained_rs or not current_rs:
+            return False
+        try:
+            retained_dt = datetime.fromisoformat(retained_rs)
+            current_dt = datetime.fromisoformat(current_rs)
+        except (ValueError, TypeError):
+            return False
+        if retained_dt <= now:
+            return False  # retained deadline already passed -> overdue, a genuine reset
+        # Same active period iff the deadline has not jumped forward into a new period.
+        # 600s absorbs relative-countdown jitter / minor server clock adjustment and is
+        # an order of magnitude below the smallest window (5h), so a genuine reset's
+        # forward jump is never mistaken for the same period.
+        same_period_tolerance_s = 600
+        return abs((current_dt - retained_dt).total_seconds()) <= same_period_tolerance_s
+
     def update(self) -> None:
         """Request a data refresh from the cache and process the result."""
         result = self.cache.update()
@@ -438,14 +484,18 @@ class UsageMonitorForCodex:
                 continue
             _, unit, _ = parsed
             reset_threshold = 95 if unit == 'hour' else 98
-            if prev > reset_threshold and pct < prev:
-                # An overdue reset DROP has been OBSERVED for this window. Record it as
-                # confirmed for its retained deadline (if that deadline has passed),
-                # INDEPENDENT of any_blocking: the reset happened; blocking only
-                # suppresses the command (which is not replayed later), so a blocked-
-                # but-observed drop must not keep the idle retry alive after the blocker
-                # clears. A pre-deadline in-period dip (retained deadline still future)
-                # is not an overdue confirmation, so the passed-deadline gate excludes it.
+            # A reset event requires a near-exhausted window to DROP (prev > threshold,
+            # pct < prev) AND that drop to be a GENUINE reset, not an in-period dip
+            # (same still-future deadline). This is the single gate for both the reset
+            # notification and on_reset_command.
+            if prev > reset_threshold and pct < prev and not self._is_in_period_dip(key, result.data, now):
+                # An overdue reset DROP has been OBSERVED for this window (it is genuine
+                # and its retained deadline has passed). Record it confirmed for that
+                # deadline, INDEPENDENT of any_blocking: the reset happened; blocking
+                # only suppresses the command (which is not replayed later), so a
+                # blocked-but-observed drop must not keep the idle retry alive after the
+                # blocker clears. (A genuine reset via an ADVANCED deadline leaves the
+                # old deadline in the past too, but is retired in Phase 4.)
                 retained_entry = self._prev_entries.get(key)
                 retained_rs = retained_entry.get('resets_at') if isinstance(retained_entry, dict) else None
                 if retained_rs:

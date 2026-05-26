@@ -1791,21 +1791,68 @@ class TestExpiredWindowReset(unittest.TestCase):
 
         self.assertFalse(self.app._idle_reset_pending)  # not reset-eligible -> not awaiting
 
-    def test_predeadline_dip_does_not_confirm_future_deadline(self):
-        """A reset that fires for an in-period dip while the deadline is still FUTURE
-        must NOT record that future deadline as confirmed: otherwise, when the deadline
-        later passes and the window is exhausted again under it, the genuine overdue
-        reset would be wrongly treated as already confirmed and the idle retry lost
-        (review 2146 Codex re-review #8)."""
+    def test_in_period_dip_under_future_deadline_does_not_fire_reset(self):
+        """A utilization drop within the SAME still-future period (97 -> 96, unchanged
+        future deadline) is a minor dip, NOT a reset: no on_reset_command (the reset
+        notification is bundled in the same suppressed firing) and no confirmation
+        record - the period has not ended (review 2248 [P2]; supersedes the old 2146 #8
+        test, which wrongly expected the in-period dip to fire)."""
         self.app._idle_reset_pending = True
         self.app._prev_utilization = {'five_hour': 97.0}
         self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.FUTURE}}
 
-        # In-period dip 97 -> 96 under the same still-FUTURE deadline fires a reset...
         self._feed({'five_hour': {'utilization': 96.0, 'resets_at': self.FUTURE}})
 
-        self.assertEqual(len(self._reset_calls('five_hour')), 1)   # dip fired a reset
-        self.assertNotIn('five_hour', self.app._reset_confirmed)   # future deadline NOT recorded confirmed
+        self.assertEqual(self._reset_calls('five_hour'), [])       # no reset command for an in-period dip
+        self.assertNotIn('five_hour', self.app._reset_confirmed)   # not confirmed (period not ended)
+
+    def test_in_period_dip_seven_day_does_not_fire_reset(self):
+        """The in-period dip guard applies to the weekly window too (99 -> 98 under the
+        same future deadline): no reset command (review 2248 repro 2)."""
+        self.app._prev_utilization = {'seven_day': 99.0}
+        self.app._prev_entries = {'seven_day': {'utilization': 99.0, 'resets_at': self.FUTURE}}
+
+        self._feed({'seven_day': {'utilization': 98.0, 'resets_at': self.FUTURE}})
+
+        self.assertEqual(self._reset_calls('seven_day'), [])
+
+    def test_large_in_period_dip_does_not_fire_reset(self):
+        """Even a LARGE drop within the same unchanged future period (97 -> 80) is not a
+        reset while the period has not rolled over (review 2248 required test 3)."""
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.FUTURE}}
+
+        self._feed({'five_hour': {'utilization': 80.0, 'resets_at': self.FUTURE}})
+
+        self.assertEqual(self._reset_calls('five_hour'), [])
+
+    def test_advanced_deadline_drop_fires_reset(self):
+        """A drop accompanied by a CHANGED (advanced) deadline is a genuine period
+        rollover and fires the reset command exactly once (review 2248 required test 4 -
+        the genuine-reset path is preserved)."""
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.PAST}}
+
+        # Old deadline passed; the new period reports a fresh future deadline at low use.
+        self._feed({'five_hour': {'utilization': 5.0, 'resets_at': self.FUTURE}})
+
+        self.assertEqual(len(self._reset_calls('five_hour')), 1)
+
+    def test_relative_deadline_drift_within_period_does_not_fire_reset(self):
+        """A relative/countdown deadline (resets_in_seconds -> now+delta) drifts by a
+        few seconds across polls but stays the SAME period; a dip under it must still be
+        suppressed - the in-period check tolerates jitter rather than requiring a
+        byte-identical resets_at (review 2248 Codex re-review)."""
+        from datetime import timedelta
+        base = datetime.now(timezone.utc) + timedelta(hours=1)
+        self.app._prev_utilization = {'five_hour': 97.0}
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': base.isoformat()}}
+        # Next poll's countdown recomputes the same deadline ~20s off (still same period).
+        drifted = (base + timedelta(seconds=20)).isoformat()
+
+        self._feed({'five_hour': {'utilization': 96.0, 'resets_at': drifted}})
+
+        self.assertEqual(self._reset_calls('five_hour'), [])
 
     def test_blocked_observed_drop_confirms_and_does_not_keep_pending(self):
         """A near-exhausted window whose OVERDUE drop is observed (97 -> 96) but whose
