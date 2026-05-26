@@ -770,6 +770,16 @@ class TestFormatTooltip(unittest.TestCase):
         self.assertEqual(format_tooltip(data), 'Codex Usage')
 
     @patch('usage_monitor_for_codex.formatting.time_until', return_value='')
+    @patch('usage_monitor_for_codex.formatting.TOOLTIP_FIELDS', ['plan_type', 'five_hour'])
+    def test_scalar_metadata_field_skipped_not_crashed(self, _mock_tu):
+        """A configured tooltip field that resolves to a SCALAR metadata value (e.g.
+        plan_type / source, which a normal live response includes) must be skipped, not
+        crash with AttributeError on a str .get() - which would take down the poll loop
+        via _render_tray. Valid windows still render."""
+        data = {'plan_type': 'plus', 'source': 'api', 'five_hour': {'utilization': 50.0, 'resets_at': ''}}
+        self.assertEqual(format_tooltip(data), 'Codex Usage\n5h: 50%')
+
+    @patch('usage_monitor_for_codex.formatting.time_until', return_value='')
     @patch('usage_monitor_for_codex.formatting.TOOLTIP_FIELDS', [])
     def test_empty_fields_shows_title_only(self, _mock_tu):
         """Empty tooltip_fields shows only the title."""

@@ -364,7 +364,12 @@ def format_tooltip(data: dict[str, Any]) -> str:
     lines = [T['tooltip_title']]
     for key in TOOLTIP_FIELDS:
         entry = data.get(key)
-        if entry and entry.get('utilization') is not None:
+        # Only sliding-window quota entries (dicts with a utilization) render as a
+        # tooltip line. A configured tooltip_fields key that resolves to a scalar
+        # metadata value (e.g. plan_type / source) or is absent is skipped, not
+        # crashed on - a stray .get() on a str would otherwise raise and take down
+        # the poll loop via _render_tray.
+        if isinstance(entry, dict) and entry.get('utilization') is not None:
             short = tooltip_label(key)
             pct = f"{entry['utilization']:.0f}%"
             reset = time_until(entry.get('resets_at', ''))
