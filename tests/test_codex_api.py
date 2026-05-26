@@ -229,6 +229,20 @@ class TestFetchUsageApi(unittest.TestCase):
         mock_get.assert_called_once_with(API_URL_USAGE, headers={'Authorization': 'Bearer test'}, timeout=10)
 
     @patch('usage_monitor_for_codex.codex_api.requests.get')
+    @patch('usage_monitor_for_codex.codex_api.api_headers',
+           return_value={'Authorization': 'Bearer test', 'ChatGPT-Account-Id': 'acct-A'})
+    def test_api_result_stamps_account_id(self, _mock_headers, mock_get):
+        """The api usage result carries the account_id it was fetched for, so the
+        UI can verify the displayed profile belongs to the same account."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {'rate_limits': CANONICAL_RATE_LIMITS}
+        mock_get.return_value = mock_resp
+
+        result = fetch_usage()
+        self.assertEqual(result['source'], 'api')
+        self.assertEqual(result['account_id'], 'acct-A')
+
+    @patch('usage_monitor_for_codex.codex_api.requests.get')
     @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
     def test_top_level_windows_located(self, _mock_headers, mock_get):
         """rate_limit windows at the top level (no wrapper key) are still found."""

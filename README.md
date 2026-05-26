@@ -110,7 +110,7 @@ Codex CLI・ChatGPT デスクトップ・各IDE拡張で共有される Codex �
 
 OAuth認証情報を扱うため、安全性を検証できるよう配慮しています。
 
-- **通信先は `chatgpt.com` のみ**。他のホストとは通信しません（`api.openai.com` などにも接続しません）
+- **アプリ自身の通信先は `chatgpt.com` のみ**。これ以外のホストへ自発的に接続することはありません（`api.openai.com` などにも接続しません）。※あなたが設定した[イベントコマンド](docs/event-commands.md)（例: Pushover / Telegram への `curl`）は、あなたが指定した送信先へ使用量情報を送信し得ます
 - **認証情報はローカルのみ**：`~/.codex/auth.json` のアクセストークンとアカウントIDを読み取り、HTTPの `Authorization` / `ChatGPT-Account-Id` ヘッダーにのみ使用します。ログ・ファイル・第三者への送信は一切行いません
 - **読み取るのはローカルのCodexデータだけ**：認証情報（`~/.codex/auth.json`）と、フォールバック用のセッションファイル（`~/.codex/sessions/.../rollout-*.jsonl`）を読み取ります。アカウントのメールアドレス・プラン名はローカルのIDトークン（JWT）から取り出し、ネットワークは使いません
 - **書き込むのは自分の状態だけ**：exe と同じフォルダの `CodexUsageMonitor.ini`（ウィンドウ位置・常に前面・項目表示）のみを書き込みます。認証情報や使用量の値をディスクに書くことはありません
@@ -250,7 +250,7 @@ Pick the data source with `usage_source`: `"auto"` (API, then local session file
 
 The tool handles your OAuth credentials, so it is built to be easy to audit.
 
-- **One network destination** — talks only to `chatgpt.com`, no other hosts (it does not contact `api.openai.com` either).
+- **One network destination of its own** — the app itself talks only to `chatgpt.com`, no other hosts (it does not contact `api.openai.com` either). Note: [event commands](docs/event-commands.md) you configure (e.g. the sample `curl` to Pushover / Telegram) can send usage info to a destination you choose.
 - **Credentials stay local** — it reads the access token and account id from `~/.codex/auth.json` and uses them only in the HTTP `Authorization` and `ChatGPT-Account-Id` headers; they are never logged, written to disk, or sent to third parties.
 - **Reads only your local Codex data** — the credentials file (`~/.codex/auth.json`) and, as a fallback, the local session rollout files (`~/.codex/sessions/.../rollout-*.jsonl`). Your account email and plan come from the local id-token JWT, with no network call.
 - **Writes only its own state** — it writes only `CodexUsageMonitor.ini` (window position, always-on-top, field display) next to the EXE. It never writes credentials or usage values to disk.

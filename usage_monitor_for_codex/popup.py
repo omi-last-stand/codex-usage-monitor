@@ -205,14 +205,30 @@ def _snapshot_to_dict(
     # usage bars would misattribute that usage to the email. This applies to both
     # an explicit usage_source="session" and an "auto" API-failure fallback; the
     # status line already flags local/session mode.
+    #
+    # Also hide it when the live usage and the cached profile provably belong to
+    # DIFFERENT accounts. The usage is stamped with the account_id it was fetched
+    # for and the profile carries that account's uuid; if a `codex login` (or a
+    # changed ChatGPT-Account-Id) happened mid-poll they can disagree, and showing
+    # one account's email beside another's usage / Credits would misattribute
+    # billing info. On a mismatch, show usage bars only until the next poll
+    # reconciles them.
     profile = None
-    on_session = bool(snap.usage and snap.usage.get('source') == 'session')
-    if snap.profile and not on_session:
+    usage_data = snap.usage or {}
+    source = usage_data.get('source')
+    profile_uuid = snap.profile.get('account', {}).get('uuid') if snap.profile else None
+    account_mismatch = (
+        source == 'api'
+        and bool(usage_data.get('account_id')) and bool(profile_uuid)
+        and usage_data.get('account_id') != profile_uuid
+    )
+    hide_account = source == 'session' or account_mismatch
+    if snap.profile and not hide_account:
         account = snap.profile.get('account', {})
         org = snap.profile.get('organization', {})
         # Prefer the live plan from the usage response (rate_limits.plan_type);
         # the id-token JWT's plan claim can be stale after an upgrade.
-        plan = (snap.usage or {}).get('plan_type') or org.get('organization_type', '')
+        plan = usage_data.get('plan_type') or org.get('organization_type', '')
         profile = {
             'email': account.get('email', ''),
             'plan': str(plan).replace('_', ' ').title(),
@@ -247,11 +263,12 @@ def _snapshot_to_dict(
     # The legacy used/monthly_limit ratio bar is kept as a fallback for any
     # future payload that carries a spend limit.
     extra = None
-    # Hide credits while on local session-fallback data: a balance is
-    # billing-sensitive and the snapshot is unverified / possibly stale or from
-    # another account, so only show it from a verified live (api) response.
-    if snap.usage and snap.usage.get('source') != 'session':
-        extra_data = snap.usage.get('extra_usage')
+    # Credits are billing-sensitive, so only show them from a verified live (api)
+    # response whose account matches the displayed profile: hidden on local
+    # session-fallback data (unverified / possibly another account) and on an
+    # account mismatch (same reasoning as the account block above).
+    if snap.usage and not hide_account:
+        extra_data = usage_data.get('extra_usage')
         if extra_data and extra_data.get('is_enabled'):
             if extra_data.get('unlimited'):
                 extra = {'mode': 'text', 'text': T['credits_unlimited']}

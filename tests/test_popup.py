@@ -501,6 +501,36 @@ class TestSnapshotToDict(unittest.TestCase):
         result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
         self.assertEqual(result['profile']['plan'], 'Pro')
 
+    def test_account_and_credits_hidden_on_account_mismatch(self):
+        """If the live usage was fetched for a different account than the cached
+        profile (e.g. a `codex login` mid-poll, or a changed ChatGPT-Account-Id),
+        the account block AND Credits are hidden, so one account's email never
+        appears beside another account's Credits in the same model."""
+        profile = {'account': {'email': 'a@example.com', 'uuid': 'acct-A'}, 'organization': {'organization_type': 'pro'}}
+        usage = {
+            'five_hour': {'utilization': 42.0, 'resets_at': ''},
+            'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250},
+            'plan_type': 'pro', 'source': 'api', 'account_id': 'acct-B',
+        }
+        result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
+        self.assertIsNone(result['profile'])          # email hidden
+        self.assertIsNone(result['extra'])             # Credits hidden
+        self.assertNotIn('account', [block['key'] for block in result['layout']])
+        # The usage bar still shows - only account/Credits are withheld.
+        self.assertTrue(result['usage'])
+
+    def test_account_and_credits_shown_on_account_match(self):
+        """When the live usage's account matches the cached profile, both show."""
+        profile = {'account': {'email': 'a@example.com', 'uuid': 'acct-A'}, 'organization': {'organization_type': 'pro'}}
+        usage = {
+            'five_hour': {'utilization': 42.0, 'resets_at': ''},
+            'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250},
+            'plan_type': 'pro', 'source': 'api', 'account_id': 'acct-A',
+        }
+        result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
+        self.assertEqual(result['profile']['email'], 'a@example.com')
+        self.assertIsNotNone(result['extra'])
+
     def test_status_fallback_carries_api_error(self):
         """An auto fallback (API failed) carries api_error so the UI shows the degraded label."""
         usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'source': 'session', 'api_error': 'expired token'}

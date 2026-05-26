@@ -220,6 +220,13 @@ def _fetch_usage_api() -> dict[str, Any]:
     if not _has_quota(result) and not result.get('extra_usage'):
         return {'error': T['no_usage_data']}
     result['source'] = 'api'
+    # Stamp the account this usage was actually fetched for (the id sent in the
+    # request), so the popup can show the account block / Credits only when they
+    # match the cached profile's account - never pairing one account's email with
+    # another's usage if `auth.json` changed mid-poll.
+    account_id = headers.get('ChatGPT-Account-Id')
+    if account_id:
+        result['account_id'] = account_id
     return result
 
 
