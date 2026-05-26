@@ -309,6 +309,15 @@ def _snapshot_to_dict(
                 block['state'] = FIELD_VISIBLE
                 break
 
+    # Degraded (local-snapshot) mode: force the status line visible so the
+    # "local snapshot / live API unavailable" indicator shows even in the
+    # compact view, where the status block is normally collapsed.
+    if snap.usage and snap.usage.get('source') == 'session':
+        for block in layout:
+            if block['key'] == 'status':
+                block['state'] = FIELD_VISIBLE
+                break
+
     return {
         'profile': profile,
         'usage': usage,

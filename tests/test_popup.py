@@ -468,6 +468,14 @@ class TestSnapshotToDict(unittest.TestCase):
         result = _snapshot_to_dict(_snap(usage=usage), installations=[])
         self.assertNotIn('source', result['status'])
 
+    def test_session_forces_status_visible(self):
+        """Degraded session mode promotes the status line to visible (shown even in compact)."""
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'source': 'session'}
+        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        status_blocks = [b for b in result['layout'] if b['key'] == 'status']
+        self.assertTrue(status_blocks)
+        self.assertEqual(status_blocks[0]['state'], 'visible')
+
     @patch('usage_monitor_for_codex.popup.format_credits', side_effect=lambda c: f'${c / 100:.2f}')
     def test_extra_usage_fill_clamped(self, _mock_credits):
         """Extra usage fill is clamped to 1.0 when over limit."""
