@@ -198,17 +198,21 @@ def _snapshot_to_dict(
     """
     # Profile - truthiness check (not `is not None`): hides the account section when the API
     # returns an empty or incomplete response, instead of rendering empty Email/Plan fields.
+    #
+    # On unverified local session data the whole account block is hidden: the app
+    # cannot confirm the session snapshot belongs to the currently-authenticated
+    # account, so showing the logged-in email beside (possibly foreign) session
+    # usage bars would misattribute that usage to the email. This applies to both
+    # an explicit usage_source="session" and an "auto" API-failure fallback; the
+    # status line already flags local/session mode.
     profile = None
-    if snap.profile:
+    on_session = bool(snap.usage and snap.usage.get('source') == 'session')
+    if snap.profile and not on_session:
         account = snap.profile.get('account', {})
         org = snap.profile.get('organization', {})
-        # Plan: prefer the live plan from the usage response (rate_limits.plan_type),
-        # but on unverified local session data do NOT attribute a (possibly foreign)
-        # plan to the current account - leave it blank so the row is hidden.
-        if snap.usage and snap.usage.get('source') == 'session':
-            plan = ''
-        else:
-            plan = (snap.usage or {}).get('plan_type') or org.get('organization_type', '')
+        # Prefer the live plan from the usage response (rate_limits.plan_type);
+        # the id-token JWT's plan claim can be stale after an upgrade.
+        plan = (snap.usage or {}).get('plan_type') or org.get('organization_type', '')
         profile = {
             'email': account.get('email', ''),
             'plan': str(plan).replace('_', ' ').title(),

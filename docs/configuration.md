@@ -116,7 +116,7 @@ Run a shell command when a usage event occurs. See [Event Commands](event-comman
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `on_reset_command` | *(none)* | Shell command (or array of commands) to run when a quota resets (usage drops) |
+| `on_reset_command` | *(none)* | Shell command (or array of commands) to run on a genuine quota reset (a near-exhausted window drops) |
 | `on_startup_command` | *(none)* | Shell command (or array of commands) to run once after the first successful usage update following app start |
 | `on_threshold_command` | *(none)* | Shell command (or array of commands) to run when usage crosses a configured alert threshold |
 

@@ -274,6 +274,26 @@ class TestFetchUsageApi(unittest.TestCase):
 
     @patch('usage_monitor_for_codex.codex_api.requests.get')
     @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
+    def test_credits_only_payload_kept(self, _mock_headers, mock_get):
+        """A live payload with no usage window but a valid credit balance is kept
+        (not discarded as no_usage_data), so the balance still reaches the UI."""
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            'plan_type': 'pro',
+            'rate_limit': None,
+            'credits': {'has_credits': True, 'unlimited': False, 'balance': '12'},
+        }
+        mock_get.return_value = mock_resp
+
+        result = fetch_usage()
+        self.assertEqual(result['source'], 'api')
+        self.assertNotIn('five_hour', result)
+        self.assertNotIn('seven_day', result)
+        self.assertEqual(result['extra_usage'], {'is_enabled': True, 'unlimited': False, 'balance': '12'})
+        self.assertEqual(result['plan_type'], 'pro')
+
+    @patch('usage_monitor_for_codex.codex_api.requests.get')
+    @patch('usage_monitor_for_codex.codex_api.api_headers', return_value={'Authorization': 'Bearer test'})
     def test_no_rate_limits_returns_no_usage_data(self, _mock_headers, mock_get):
         """A response without any rate-limit windows returns no_usage_data."""
         mock_resp = MagicMock()
@@ -712,6 +732,43 @@ class TestSessionFallback(unittest.TestCase):
 
         self.assertEqual(result['source'], 'session')
         self.assertEqual(result['five_hour']['utilization'], 10.0)  # 10:00 newer than 08:00
+
+    @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'session')
+    def test_newest_content_selected_past_mtime_cap(self):
+        """The newest-content snapshot must win even when its mtime is older than
+        a whole cap's worth of decoy files (sync / restore / touch clobbers
+        mtime). The path-ordered prefilter (date dir + ISO filename) surfaces it
+        where an mtime-only prefilter would drop it."""
+        import os
+        import time
+        with TemporaryDirectory() as tmp:
+            sessions = Path(tmp)
+
+            def write(day, name, ts, used, mtime):
+                d = sessions / day
+                d.mkdir(parents=True, exist_ok=True)
+                rl = {'primary': {'used_percent': used, 'window_minutes': 300, 'resets_at': 1779754106}}
+                rec = {'timestamp': ts, 'payload': {'type': 'token_count', 'info': {'rate_limits': rl}}}
+                p = d / f'rollout-{name}.jsonl'
+                p.write_text(json.dumps(rec) + '\n', encoding='utf-8')
+                os.utime(p, (mtime, mtime))
+
+            now = time.time()
+            # 40 decoys: older date/content, but the freshest mtimes - enough to
+            # fill the mtime prefilter cap (max_files=40) on their own.
+            for i in range(40):
+                write('2026/05/25', f'2026-05-25T00-00-00-decoy{i:02d}',
+                      '2026-05-25T08:00:00Z', 90, now)
+            # Real newest snapshot: newest date/filename (sorts first by path) but
+            # an OLD mtime, so an mtime-only prefilter would never scan it.
+            write('2026/05/26', '2026-05-26T10-00-00-real',
+                  '2026-05-26T10:00:00Z', 10, now - 10_000)
+
+            with patch('usage_monitor_for_codex.codex_api.CODEX_SESSIONS_DIR', sessions):
+                result = fetch_usage()
+
+        self.assertEqual(result['source'], 'session')
+        self.assertEqual(result['five_hour']['utilization'], 10.0)  # the real newest content
 
     @patch('usage_monitor_for_codex.codex_api.USAGE_SOURCE', 'auto')
     @patch('usage_monitor_for_codex.codex_api.requests.get', side_effect=requests.ConnectionError())

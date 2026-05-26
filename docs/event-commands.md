@@ -8,7 +8,7 @@ Add these keys to your [`usage-monitor-settings.json`](configuration.md). After 
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `on_reset_command` | *(none)* | Shell command (or array of commands) to run when a quota resets (usage drops) |
+| `on_reset_command` | *(none)* | Shell command (or array of commands) to run on a genuine quota reset (a near-exhausted window drops) |
 | `on_startup_command` | *(none)* | Shell command (or array of commands) to run once after the first successful usage update following app start |
 | `on_threshold_command` | *(none)* | Shell command (or array of commands) to run when usage crosses a configured alert threshold |
 
@@ -174,7 +174,7 @@ Available in all event commands:
 
 ### `on_reset_command`
 
-Fires whenever usage drops (not only when nearly exhausted).
+Fires only on a **genuine reset**, not on every dip: a window that was near-exhausted - the primary (5h) window above 95%, or the weekly (7d) window above 98% - then drops, and no other quota is still blocking (none at or above 99%). A minor dip of the rolling window does **not** fire the command, so an auto-action such as `codex resume` only runs when the quota actually frees up. Use `USAGE_MONITOR_PREV_UTILIZATION` for further filtering.
 
 | Variable | Example | Description |
 |---|---|---|

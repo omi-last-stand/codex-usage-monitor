@@ -46,41 +46,41 @@ ChatGPT-Account-Id: <account_id>
 Accept: application/json
 ```
 
-The response contains a `rate_limits` object (the app also accepts the windows at the top level, or under `rate_limit`). The relevant shape:
+The live response is a `RateLimitStatusPayload`: a top-level `rate_limit` object holding the usage windows (`primary_window` / `secondary_window`), plus top-level `plan_type` and `credits`. The relevant shape:
 
 ```json
 {
-  "rate_limits": {
-    "primary":   { "used_percent": 4.0,  "window_minutes": 300,   "resets_at": 1779754106 },
-    "secondary": { "used_percent": 12.0, "window_minutes": 10080, "resets_at": 1780192198 },
-    "credits": null,
-    "plan_type": "plus"
-  }
+  "plan_type": "pro",
+  "rate_limit": {
+    "primary_window":   { "used_percent": 4.0,  "limit_window_seconds": 18000,  "reset_at": 1779754106 },
+    "secondary_window": { "used_percent": 12.0, "limit_window_seconds": 604800, "reset_at": 1780192198 }
+  },
+  "credits": { "has_credits": false, "unlimited": false, "balance": null }
 }
 ```
 
-### `rate_limits` fields
+### Top-level fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `primary` | object \| null | The rolling short window (typically 5 hours). |
-| `secondary` | object \| null | The longer window (typically weekly / 7 days). |
-| `credits` | object \| null | Optional credits balance (paid overage); see [Extra usage](#extra-usage-credits). Often `null`. |
 | `plan_type` | string | ChatGPT plan, e.g. `"plus"`, `"pro"`, `"team"`. |
+| `rate_limit` | object \| null | Holds the usage windows (`primary_window` / `secondary_window`). May be `null` when no window is active. |
+| `credits` | object \| null | Credits balance (paid overage); see [Extra usage](#extra-usage-credits). Often `null` on plans without purchased credits. |
 
-Each window (`primary` / `secondary`) has:
+Each window (`primary_window` / `secondary_window`) has:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `used_percent` | number | Percentage of the window consumed (0–100). |
-| `window_minutes` | number | Length of the window in minutes (e.g. `300` = 5h, `10080` = 7d). |
-| `resets_at` | number | When the window resets, as a Unix epoch (seconds; milliseconds if very large). |
+| `limit_window_seconds` | number | Length of the window in seconds (e.g. `18000` = 5h, `604800` = 7d). Converted to whole minutes by rounding up — `(seconds + 59) // 60` — matching the official client's `window_minutes_from_seconds`. |
+| `reset_at` | number | When the window resets, as a Unix epoch (seconds; milliseconds if very large). |
 
-A relative `resets_in_seconds` / `reset_after_seconds` / `resets_in` is also accepted in place of `resets_at` and converted to an absolute time.
+> [!NOTE]
+> This is the live HTTP shape. The local session files carry an **already-transformed** snapshot with different field names (`primary` / `secondary` with `window_minutes` and `resets_at`); see [Session-file fallback](#session-file-fallback--codexsessionsrollout-jsonl) below. For resilience the parser accepts either set of names on a window, a relative `reset_after_seconds` / `resets_in_seconds` / `resets_in` in place of an absolute reset, and the whole object either at the top level or wrapped under a `rate_limits` key.
 
 ## Internal mapping — `primary`/`secondary` → `five_hour`/`seven_day`
 
-To reuse the app's existing field machinery (labels, period bars, thresholds, notifications), each window is translated into a quota entry keyed by its **length**:
+To reuse the app's existing field machinery (labels, period bars, thresholds, notifications), each window is translated into a quota entry keyed by its **length in minutes** (computed from `limit_window_seconds` on the live API, or read from `window_minutes` in a session snapshot):
 
 - `window_minutes` that is a whole number of hours → `<n>_hour` (e.g. `300` → `five_hour`).
 - a whole number of days → `<n>_day` (e.g. `10080` → `seven_day`).
@@ -101,7 +101,7 @@ Each entry carries `utilization` (from `used_percent`) and an ISO-8601 `resets_a
 
 ### Extra usage (credits)
 
-The Codex `rate_limits.credits` field is a `CreditsSnapshot` — `{ "has_credits": bool, "unlimited": bool, "balance": string | null }`:
+The Codex `credits` snapshot — top-level on the live API, `rate_limits.credits` in a session snapshot — is a `CreditsSnapshot`, `{ "has_credits": bool, "unlimited": bool, "balance": string | null }`:
 
 ```json
 { "has_credits": true, "unlimited": false, "balance": "1250" }
@@ -127,7 +127,7 @@ When the API is unavailable (or `usage_source` is `"session"`), the app reads th
 ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
 ```
 
-These are JSONL transcripts the Codex CLI writes per session. The app scans the most recently modified files newest-first, and for performance only JSON-parses lines that mention `rate_limits`. The `rate_limits` object is found in any of these shapes per line:
+These are JSONL transcripts the Codex CLI writes per session. The app scans a bounded set of recent files — the newest by modification time **and** the newest by path (the `YYYY/MM/DD` directory plus the timestamped filename sort chronologically, so a synced/restored file with a misleading mtime is still considered) — then picks the snapshot with the newest *record* timestamp. For performance only lines that mention `rate_limits` are JSON-parsed. The `rate_limits` object is found in any of these shapes per line:
 
 ```json
 { "payload": { "info": { "rate_limits": { "primary": { "used_percent": 4.0, "window_minutes": 300, "resets_at": 1779754106 } } } } }

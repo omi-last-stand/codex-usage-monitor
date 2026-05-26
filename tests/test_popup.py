@@ -476,13 +476,23 @@ class TestSnapshotToDict(unittest.TestCase):
         self.assertTrue(status_blocks)
         self.assertEqual(status_blocks[0]['state'], 'visible')
 
-    def test_plan_hidden_on_session_source(self):
-        """On unverified session data, a (possibly foreign) plan is not attributed to the user."""
+    def test_account_hidden_on_explicit_session_source(self):
+        """On unverified session data the whole account block is hidden, so the
+        current account's email is never shown beside (possibly foreign) session
+        usage. Covers explicit usage_source="session" (no api_error)."""
         profile = {'account': {'email': 'u@example.com', 'uuid': 'x'}, 'organization': {'organization_type': 'plus'}}
         usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'plan_type': 'team', 'source': 'session'}
         result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
-        self.assertEqual(result['profile']['email'], 'u@example.com')
-        self.assertEqual(result['profile']['plan'], '')  # suppressed (not "Team")
+        self.assertIsNone(result['profile'])
+        self.assertNotIn('account', [block['key'] for block in result['layout']])
+
+    def test_account_hidden_on_auto_fallback_source(self):
+        """The same applies to an auto API-failure fallback (api_error present)."""
+        profile = {'account': {'email': 'u@example.com', 'uuid': 'x'}, 'organization': {'organization_type': 'plus'}}
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'source': 'session', 'api_error': 'expired token'}
+        result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
+        self.assertIsNone(result['profile'])
+        self.assertNotIn('account', [block['key'] for block in result['layout']])
 
     def test_plan_shown_on_api_source(self):
         """On live (api) data, the plan is shown."""

@@ -214,7 +214,10 @@ def _fetch_usage_api() -> dict[str, Any]:
     # "rate_limits". transform_rate_limits handles either nesting.
     obj = payload.get('rate_limits') if isinstance(payload.get('rate_limits'), dict) else payload
     result = transform_rate_limits(obj)
-    if not _has_quota(result):
+    # Keep a credits-only live response: the official client tolerates a payload
+    # whose primary rate_limit is absent, and discarding a valid credit balance
+    # just because no usage window is present would hide it from the user.
+    if not _has_quota(result) and not result.get('extra_usage'):
         return {'error': T['no_usage_data']}
     result['source'] = 'api'
     return result
@@ -457,23 +460,42 @@ def _has_quota(data: dict[str, Any]) -> bool:
 def _latest_session_rate_limits(max_files: int = 40) -> tuple[str | None, dict[str, Any]] | None:
     """Return ``(snapshot_at, rate_limits)`` from the freshest session record.
 
-    File mtime is only a cheap prefilter for *which* recent ``rollout-*.jsonl``
-    files to scan; the chosen snapshot is the one with the newest *record*
-    timestamp, so a stale file that was merely touched / synced / restored
-    cannot win over genuinely fresher data.  Only lines mentioning
-    ``rate_limits`` are JSON-parsed.  Returns ``None`` when none is found.
+    The candidate files are a cheap prefilter for *which* recent
+    ``rollout-*.jsonl`` files to scan; the chosen snapshot is the one with the
+    newest *record* timestamp, so a merely touched / synced / restored file
+    cannot win over genuinely fresher data.  The scan is deliberately bounded
+    (we never open every file), so the candidate set unions two prefilters whose
+    blind spots differ, which surfaces the freshest record in every realistic
+    case:
+
+    * **newest by mtime** - surfaces a long-running, older-dated session that was
+      appended to most recently (a write updates mtime); and
+    * **newest by path** - the ``YYYY/MM/DD`` directory plus the ISO-timestamp
+      ``rollout-<ts>-<uuid>.jsonl`` filename sort chronologically, so a freshly
+      created session is still considered even when its mtime was clobbered by a
+      sync / restore / touch.
+
+    The only residual gap is pathological - the newest record living in an
+    *old-named* file whose mtime was *also* clobbered, behind ``max_files``
+    newer entries in **both** orderings at once - which does not occur in normal
+    use.  Only lines mentioning ``rate_limits`` are JSON-parsed.  Returns
+    ``None`` when none is found.
     """
     if not CODEX_SESSIONS_DIR.is_dir():
         return None
 
     try:
-        files = sorted(
-            CODEX_SESSIONS_DIR.glob('*/*/*/rollout-*.jsonl'),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )[:max_files]
+        all_files = list(CODEX_SESSIONS_DIR.glob('*/*/*/rollout-*.jsonl'))
     except OSError:
         return None
+
+    try:
+        by_mtime = sorted(all_files, key=lambda p: p.stat().st_mtime, reverse=True)[:max_files]
+    except OSError:
+        by_mtime = []
+    by_path = sorted(all_files, reverse=True)[:max_files]
+    # dict.fromkeys dedups while preserving the mtime-first ordering.
+    files = list(dict.fromkeys(by_mtime + by_path))
 
     best: tuple[datetime, str, dict[str, Any]] | None = None
     fallback: tuple[str | None, dict[str, Any]] | None = None

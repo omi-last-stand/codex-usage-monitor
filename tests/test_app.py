@@ -2222,6 +2222,33 @@ class TestStartupCommand(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.run_event_command')
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_fires_on_first_live_sample_after_session(self, _icon, _tooltip, mock_cmd):
+        """After an initial session fallback, the startup command fires on the
+        FIRST verified live (api) sample - not delayed to the second api poll."""
+        session_data = {'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'session'}
+        api_data = {'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api'}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data=session_data),
+            UpdateResult(data=api_data),
+            UpdateResult(data=api_data),
+        ]
+
+        self.app.update()  # session: display-only, startup suppressed
+        self.assertEqual(mock_cmd.call_count, 0)
+        self.assertFalse(self.app._first_update_done)
+
+        self.app.update()  # first verified live sample (source switch): fire now
+        self.assertEqual(mock_cmd.call_count, 1)
+        self.assertTrue(self.app._first_update_done)
+        self.assertEqual(mock_cmd.call_args[0][1]['USAGE_MONITOR_EVENT'], 'startup')
+
+        self.app.update()  # subsequent api: no re-fire
+        self.assertEqual(mock_cmd.call_count, 1)
+
+    @patch('usage_monitor_for_codex.app.ON_STARTUP_COMMAND', ['echo startup'])
+    @patch('usage_monitor_for_codex.app.run_event_command')
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
     def test_extra_usage_env_vars_when_enabled(self, _icon, _tooltip, mock_cmd):
         """Extra usage env vars are emitted when extra_usage is enabled."""
         data = {
