@@ -2394,6 +2394,42 @@ class TestSourceSwitchGuard(unittest.TestCase):
         self.app.update()  # recovered api (source switch): MUST refresh profile
         self.app.cache.ensure_profile.assert_called_once()
 
+    def test_usage_account_id_change_suppresses_false_reset(self):
+        """A same-token ChatGPT-Account-Id change (the live usage's account_id
+        changes but the profile uuid does not, so the uuid-based switch detection
+        misses it) re-baselines instead of misreading the new account's lower
+        usage as a reset of the old account's near-exhausted quota."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'uuid-fixed', 'email': 'x@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),
+        ]
+        self.app.update()  # account A near its limit
+        self.app.icon.notify.reset_mock()
+        self.app.update()  # account B (same token/uuid) low usage -> re-baseline, NOT a reset
+        self.app.icon.notify.assert_not_called()
+        self.assertEqual(self.app._prev_utilization, {'five_hour': 5.0})
+
+    def test_account_id_change_after_session_recovery_suppresses_reset(self):
+        """The same-token account_id guard also covers the session->api recovery
+        path: the recovery sample records its account_id despite the source-switch
+        early return, so a later same-token account change is re-baselined, not
+        misread as a reset."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'uuid-fixed', 'email': 'x@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 50.0, 'resets_at': ''}, 'source': 'session'}),
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),
+        ]
+        self.app.update()  # session fallback
+        self.app.update()  # recovery api A@97 (source switch) -> records acct-A
+        self.app.icon.notify.reset_mock()
+        self.app.update()  # api B@5 (same token, account_id changed) -> re-baseline, NOT a reset
+        self.app.icon.notify.assert_not_called()
+        self.assertEqual(self.app._prev_utilization, {'five_hour': 5.0})
+
     def test_repeated_flapping_does_not_fire(self):
         """Every poll being a source switch suppresses alerts entirely (no spurious fire)."""
         self._feed(10, 'api')  # establish, low

@@ -550,6 +550,12 @@ class UsagePopup:
         loop ends and ``UnhookWindowsHookEx`` runs - otherwise reopening the
         widget would leak a global hook on every open/close cycle.
         """
+        # Force-create this thread's message queue BEFORE publishing its id:
+        # PostThreadMessageW fails on a thread that has no message queue yet, so a
+        # close racing in before the first GetMessageW could otherwise lose the
+        # WM_QUIT and leave the thread blocked with the hook installed.
+        _qmsg = ctypes.wintypes.MSG()
+        ctypes.windll.user32.PeekMessageW(ctypes.byref(_qmsg), None, 0, 0, 0)  # PM_NOREMOVE
         self._hook_thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         _call_next = ctypes.windll.user32.CallNextHookEx
         _call_next.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_int, ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM]

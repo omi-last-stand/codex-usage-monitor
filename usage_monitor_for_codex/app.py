@@ -54,6 +54,7 @@ class UsageMonitorForCodex:
         # Notification state
         self._prev_utilization: dict[str, float] = {}
         self._prev_account_uuid: str | None = None
+        self._prev_usage_account_id: str | None = None
         self._prev_source: str | None = None
         self._first_update_done = False
         self._notified_thresholds: dict[str, float] = {}
@@ -289,6 +290,10 @@ class UsageMonitorForCodex:
                 # account's email shown beside the NEW account's live usage and
                 # Credits until the next poll (account / credit misattribution).
                 self.cache.ensure_profile()
+                # Record the account this live sample was for, so the next sample
+                # can detect a same-token account switch (the early return here
+                # would otherwise skip the bookkeeping below and miss it).
+                self._prev_usage_account_id = result.data.get('account_id')
                 # The one-time startup command must also fire on this first live
                 # sample even when it follows a session fallback; threshold/reset
                 # events stay suppressed (re-baselined above).
@@ -297,9 +302,24 @@ class UsageMonitorForCodex:
                     self._first_update_done = True
             return
 
-        # Detect account switch: re-fetch profile if the access token changed, then compare UUIDs.
-        # When the user runs 'codex login', the token changes and the next profile fetch
-        # returns a different account id, preventing a false quota-reset notification.
+        # The account the live usage was actually fetched for (stamped from the
+        # request's ChatGPT-Account-Id). The (access_token, account_id)-keyed
+        # profile cache normally turns a same-token account switch into a uuid
+        # change the account-switch block below catches; tracking it here is a
+        # fallback for when that can't (e.g. the profile fetch returned None), so a
+        # cross-account drop is still re-baselined rather than misread as a reset.
+        usage_account_id = result.data.get('account_id')
+        account_id_changed = (
+            self._prev_usage_account_id is not None and usage_account_id is not None
+            and usage_account_id != self._prev_usage_account_id
+        )
+        self._prev_usage_account_id = usage_account_id
+
+        # Detect account switch: re-fetch the profile if the access token OR the
+        # account id changed, then compare UUIDs. A 'codex login' (new token) or a
+        # same-token workspace/account switch (new account id) yields a different
+        # account uuid, which re-baselines change-detection and prevents a false
+        # quota-reset notification.
         self.cache.ensure_profile()
         current_profile = self.cache.profile
         current_account_uuid = current_profile.get('account', {}).get('uuid') if isinstance(current_profile, dict) else None
@@ -312,6 +332,16 @@ class UsageMonitorForCodex:
             self._prev_account_uuid = current_account_uuid
             return
         self._prev_account_uuid = current_account_uuid
+
+        # Fallback for a same-token account change the uuid-based switch above
+        # could not catch (e.g. the profile fetch failed, so the uuid did not
+        # change): re-baseline silently so the new account's usage is not compared
+        # against the old account's, which could otherwise fire a false reset
+        # notification / on_reset_command.
+        if account_id_changed:
+            self._prev_utilization = quota_fields
+            self._seed_threshold_baseline(result.data)
+            return
 
         # Quota reset: notify AND run the reset command only on a *genuine* reset -
         # usage was near-exhausted and then dropped, with no other quota blocking.

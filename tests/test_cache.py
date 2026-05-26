@@ -692,12 +692,14 @@ class TestEnsureProfile(unittest.TestCase):
         self.assertEqual(cache.profile, {'name': 'Test User'})
         mock_fetch.assert_called_once()
 
+    @patch('usage_monitor_for_codex.cache.read_account_id', return_value='acct-x')
     @patch('usage_monitor_for_codex.cache.read_access_token', return_value='token-x')
     @patch('usage_monitor_for_codex.cache.fetch_profile')
-    def test_skips_when_already_loaded(self, mock_fetch, _mock_token):
+    def test_skips_when_already_loaded(self, mock_fetch, _mock_token, _mock_account):
         cache = _make_cache()
         cache._profile = {'name': 'Cached'}
         cache._profile_token = 'token-x'
+        cache._profile_account_id = 'acct-x'
         cache.ensure_profile()
         mock_fetch.assert_not_called()
 
@@ -822,6 +824,25 @@ class TestEnsureProfileTokenChange(unittest.TestCase):
 
         self.assertEqual(mock_profile.call_count, 2)
         self.assertEqual(cache.profile, {'account': {'uuid': 'uuid-2'}})
+
+    @patch('usage_monitor_for_codex.cache.fetch_profile')
+    @patch('usage_monitor_for_codex.cache.read_account_id')
+    @patch('usage_monitor_for_codex.cache.read_access_token', return_value='token-x')
+    def test_refetch_when_account_id_changes(self, _mock_token, mock_account, mock_profile):
+        """ensure_profile re-fetches when the ChatGPT-Account-Id changes even if the
+        access token is unchanged (a same-token workspace/account switch), so the
+        profile never lags the account the usage is actually fetched for."""
+        mock_account.return_value = 'acct-A'
+        mock_profile.return_value = {'account': {'uuid': 'acct-A'}}
+        cache = _make_cache()
+        cache.ensure_profile()
+
+        mock_account.return_value = 'acct-B'
+        mock_profile.return_value = {'account': {'uuid': 'acct-B'}}
+        cache.ensure_profile()
+
+        self.assertEqual(mock_profile.call_count, 2)
+        self.assertEqual(cache.profile, {'account': {'uuid': 'acct-B'}})
 
     @patch('usage_monitor_for_codex.cache.fetch_profile')
     @patch('usage_monitor_for_codex.cache.read_access_token')

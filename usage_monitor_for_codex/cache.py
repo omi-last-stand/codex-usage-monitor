@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .codex_api import fetch_profile, fetch_usage, read_access_token
+from .codex_api import fetch_profile, fetch_usage, read_access_token, read_account_id
 from .codex_cli import RefreshResult, refresh_token
 from .settings import MAX_BACKOFF, POLL_FAST, POLL_INTERVAL
 
@@ -67,6 +67,7 @@ class UsageCache:
         self._usage: dict[str, Any] = {}
         self._profile: dict[str, Any] | None = None
         self._profile_token: str | None = None
+        self._profile_account_id: str | None = None
         self._last_success_time: float | None = None
         self._refreshing = False
         self._last_error: str | None = None
@@ -128,25 +129,29 @@ class UsageCache:
     # Public methods
 
     def ensure_profile(self) -> None:
-        """Fetch the account profile if not yet loaded, or re-fetch if the access token changed (thread-safe).
+        """Fetch the account profile if not loaded, or re-fetch if the access token
+        OR account id changed (thread-safe).
 
-        Acquires ``_lock`` around the HTTP call to prevent concurrent
-        API requests with ``update()``.
+        Both the access token and the ``ChatGPT-Account-Id`` select which account
+        the usage API and the profile describe, so a change in EITHER - a
+        ``codex login`` (new token) or a workspace/account switch on the same
+        token (new account id) - must invalidate the cached profile. Acquires
+        ``_lock`` around the HTTP call to prevent concurrent API requests.
         """
-        current_token = read_access_token()
-        if self._profile is not None and self._profile_token == current_token:
+        current = (read_access_token(), read_account_id())
+        if self._profile is not None and (self._profile_token, self._profile_account_id) == current:
             return
 
         with self._profile_lock:
-            current_token = read_access_token()
-            if self._profile is not None and self._profile_token == current_token:
+            current = (read_access_token(), read_account_id())
+            if self._profile is not None and (self._profile_token, self._profile_account_id) == current:
                 return
             log.info('fetch_profile started')
             with self._lock:
                 profile = fetch_profile()
             with self._state_lock:
                 self._profile = profile
-                self._profile_token = current_token
+                self._profile_token, self._profile_account_id = current
                 self._version += 1
             log.info('fetch_profile -> %s', 'OK' if profile else 'failed')
 
@@ -263,21 +268,25 @@ class UsageCache:
 
     def _record_success(self, data: dict[str, Any]) -> None:
         """Apply common state updates after a successful API response."""
-        # If a profile is already cached and the access token has since changed
-        # (e.g. the user ran `codex login`), refresh the profile in the SAME
-        # critical section as the usage. The popup reads CacheSnapshot on its own
-        # 500ms timer, so committing usage now and the profile later (via
-        # ensure_profile) would leave a window where new-account usage/Credits
-        # render beside the old account's email. fetch_profile() is a local
-        # JWT decode of auth.json - no network. (When no profile is cached yet,
-        # the cold-start path is left to ensure_profile() as before.)
+        # If a profile is already cached and the credentials it was decoded from
+        # have since changed - the access token (a `codex login`) OR the account
+        # id (a same-token workspace/account switch) - refresh the profile in the
+        # SAME critical section as the usage. The popup reads CacheSnapshot on its
+        # own 500ms timer, so committing usage now and the profile later (via
+        # ensure_profile) would leave a window where one account's usage/Credits
+        # render beside another account's email. fetch_profile() is a local JWT
+        # decode of auth.json - no network. (When no profile is cached yet, the
+        # cold-start path is left to ensure_profile() as before.)
         new_profile = self._profile
         new_profile_token = self._profile_token
+        new_profile_account_id = self._profile_account_id
         if self._profile is not None:
             current_token = read_access_token()
-            if self._profile_token != current_token:
+            current_account_id = read_account_id()
+            if self._profile_token != current_token or self._profile_account_id != current_account_id:
                 new_profile = fetch_profile()
                 new_profile_token = current_token
+                new_profile_account_id = current_account_id
 
         # _usage is always reassigned (never mutated in place), so existing
         # CacheSnapshot references remain valid after this update.
@@ -290,6 +299,7 @@ class UsageCache:
             self._usage = data
             self._profile = new_profile
             self._profile_token = new_profile_token
+            self._profile_account_id = new_profile_account_id
             self._refreshing = False
             self._version += 1
 
