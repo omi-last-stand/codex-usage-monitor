@@ -439,13 +439,40 @@ class TestSnapshotToDict(unittest.TestCase):
         self.assertEqual(extra['mode'], 'text')
         self.assertTrue(extra['text'])
 
-    def test_credits_shown_on_api_source(self):
-        """Credits ARE shown from a verified live (api) response."""
+    def test_credits_shown_on_verified_api_source(self):
+        """Credits ARE shown from a verified live (api) response - account_id present
+        and matching the cached profile's uuid."""
+        profile = {'account': {'email': 'u@example.com', 'uuid': 'acct-A'}}
         usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''},
-                 'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250}, 'source': 'api'}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+                 'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250},
+                 'source': 'api', 'account_id': 'acct-A'}
+        result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
         self.assertIsNotNone(result['extra'])
         self.assertEqual(result['extra']['mode'], 'text')
+
+    def test_credits_hidden_when_identity_unverifiable(self):
+        """A live (api) success without a usable account_id (e.g. absent account_id
+        and an unreadable id-token JWT) cannot be verified against the profile, so
+        Credits are hidden (fail-closed) - the usage bars still show."""
+        profile = {'account': {'email': 'a@example.com', 'uuid': 'acct-A'}}
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''},
+                 'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250},
+                 'source': 'api'}  # no account_id -> unverifiable
+        result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
+        self.assertIsNone(result['profile'])
+        self.assertIsNone(result['extra'])
+        self.assertTrue(result['usage'])
+
+    def test_account_hidden_when_profile_uuid_missing(self):
+        """When the cached profile has no uuid to verify against, live account and
+        Credits are hidden (fail-closed) even though the usage carries an account_id."""
+        profile = {'account': {'email': 'a@example.com'}}  # no uuid
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''},
+                 'extra_usage': {'is_enabled': True, 'unlimited': False, 'balance': 1250},
+                 'source': 'api', 'account_id': 'acct-A'}
+        result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
+        self.assertIsNone(result['profile'])
+        self.assertIsNone(result['extra'])
 
     def test_credits_hidden_on_session_source(self):
         """Credits (billing-sensitive) are hidden while on unverified local session data."""
@@ -494,10 +521,10 @@ class TestSnapshotToDict(unittest.TestCase):
         self.assertIsNone(result['profile'])
         self.assertNotIn('account', [block['key'] for block in result['layout']])
 
-    def test_plan_shown_on_api_source(self):
-        """On live (api) data, the plan is shown."""
+    def test_plan_shown_on_verified_api_source(self):
+        """On verified live (api) data (account_id matches the profile uuid), the plan is shown."""
         profile = {'account': {'email': 'u@example.com', 'uuid': 'x'}, 'organization': {'organization_type': 'plus'}}
-        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'plan_type': 'pro', 'source': 'api'}
+        usage = {'five_hour': {'utilization': 42.0, 'resets_at': ''}, 'plan_type': 'pro', 'source': 'api', 'account_id': 'x'}
         result = _snapshot_to_dict(_snap(usage=usage, profile=profile), installations=[])
         self.assertEqual(result['profile']['plan'], 'Pro')
 

@@ -53,6 +53,7 @@ class UsageMonitorForCodex:
 
         # Notification state
         self._prev_utilization: dict[str, float] = {}
+        self._prev_verified = False  # was _prev_utilization set by a verified sample?
         self._prev_account_uuid: str | None = None
         self._prev_usage_account_id: str | None = None
         self._prev_source: str | None = None
@@ -270,6 +271,14 @@ class UsageMonitorForCodex:
             if isinstance(value, dict) and 'utilization' in value:
                 quota_fields[key] = value.get('utilization', 0) or 0
 
+        # Whether the PREVIOUS sample that set _prev_utilization was a fully
+        # verified, fully-processed sample. Only then is a drop a trustworthy quota
+        # reset - not a transition off an unverified / session / mismatched sample,
+        # whose utilization must never seed a false reset. Default this sample to
+        # unverified; it is marked verified only if it reaches the end of update().
+        prev_verified = self._prev_verified
+        self._prev_verified = False
+
         # Local session-fallback data (and the first sample after any source
         # switch) is unverified - it may be stale or from a different account -
         # so it must drive the DISPLAY only, never notifications or event
@@ -373,7 +382,7 @@ class UsageMonitorForCodex:
             reset_threshold = 95 if unit == 'hour' else 98
             any_blocking = any(other_pct >= 99 for other_key, other_pct in quota_fields.items() if other_key != key)
 
-            if prev > reset_threshold and pct < prev and not any_blocking:
+            if prev_verified and prev > reset_threshold and pct < prev and not any_blocking:
                 self._notify_or_defer('reset', T['notify_reset'], T['notify_reset_title'])
                 self._run_reset_command(key, pct, prev, data=result.data, entry=result.data.get(key, {}))
                 self._idle_reset_pending = False
@@ -390,6 +399,9 @@ class UsageMonitorForCodex:
             self._fast_polls_remaining -= 1
 
         self._prev_utilization = quota_fields
+        # This sample was fully verified and processed, so its utilization is a
+        # trustworthy baseline for the next sample's reset detection.
+        self._prev_verified = True
 
         # Fire the one-time startup command on the first successful update, but
         # only when this live sample's account matches the displayed profile -
@@ -400,15 +412,18 @@ class UsageMonitorForCodex:
             self._first_update_done = True
 
     def _identity_ok(self, data: dict[str, Any]) -> bool:
-        """True unless the live sample's stamped account is known to differ from
-        the cached profile's account - i.e. a mid-account-switch sample whose
-        usage belongs to a different account than the one now displayed. Gates
-        event export so a mismatched live sample never drives a command.
+        """Fail-closed account check gating billing-sensitive event export for LIVE
+        (api) samples: a live sample drives notifications / event commands only when
+        its account is POSITIVELY verified - the usage carries an account_id, the
+        cached profile carries a uuid, and they match. An unidentified, partially
+        identified, or mismatched live sample is suppressed (re-baselined). Non-api
+        samples (session is already gated upstream) are not account-checked here.
         """
+        if data.get('source') != 'api':
+            return True
         prof = self.cache.profile
         profile_uuid = prof.get('account', {}).get('uuid') if isinstance(prof, dict) else None
-        usage_account = data.get('account_id')
-        return not (usage_account and profile_uuid and usage_account != profile_uuid)
+        return bool(data.get('account_id')) and bool(profile_uuid) and data.get('account_id') == profile_uuid
 
     # Notifications
 
@@ -440,10 +455,18 @@ class UsageMonitorForCodex:
     def _seed_threshold_baseline(self, data: dict[str, Any]) -> None:
         """Seed notified-threshold baselines from the current sample without firing.
 
-        Used when the data source switches (live API <-> session fallback) so an
-        already-exceeded threshold in the freshly-switched sample is treated as
-        already-notified and does not emit a spurious alert or command.  A genuine
-        later increase past a higher threshold still fires on the next poll.
+        Used when the data source switches (live API <-> session fallback) or when
+        an unverified / mid-account-switch live sample is processed, so an
+        already-exceeded threshold in that sample is treated as already-notified and
+        does not emit a spurious alert or command.  A genuine later increase past a
+        higher threshold still fires on the next poll.
+
+        This only ever RAISES a baseline, never lowers it: an unverified or
+        display-only sample must not reset a threshold that a previously *verified*
+        sample already notified, or the next verified high sample would be treated
+        as a fresh crossing and re-fire ``on_threshold_command``.  The legitimate
+        "usage dropped, re-arm" path lives in :meth:`_check_threshold_alerts`, which
+        runs only for verified samples.
         """
         for variant_key, entry in data.items():
             if variant_key == 'extra_usage':
@@ -452,7 +475,10 @@ class UsageMonitorForCodex:
                 continue
             pct = entry['utilization']
             exceeded = [t for t in get_alert_thresholds(variant_key) if pct >= t]
-            self._notified_thresholds[variant_key] = max(exceeded) if exceeded else 0
+            seed = max(exceeded) if exceeded else 0
+            self._notified_thresholds[variant_key] = max(
+                self._notified_thresholds.get(variant_key, 0), seed
+            )
 
         extra = data.get('extra_usage')
         if extra and extra.get('is_enabled'):
@@ -460,7 +486,10 @@ class UsageMonitorForCodex:
             if limit > 0:
                 pct = (extra.get('used_credits', 0) or 0) / limit * 100
                 exceeded = [t for t in get_alert_thresholds('extra_usage') if pct >= t]
-                self._notified_thresholds['extra_usage'] = max(exceeded) if exceeded else 0
+                seed = max(exceeded) if exceeded else 0
+                self._notified_thresholds['extra_usage'] = max(
+                    self._notified_thresholds.get('extra_usage', 0), seed
+                )
 
     def _check_threshold_alerts(self, data: dict[str, Any]) -> None:
         """Show a notification when usage crosses a configured threshold.

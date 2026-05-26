@@ -42,6 +42,10 @@ def _make_app(thresholds: list[float] | None = None) -> UsageMonitorForCodex:
     ]
     for active_patch in app._active_patches:
         active_patch.start()
+    # Default to a verified prior baseline: most tests set _prev_utilization to
+    # simulate a previous (verified) poll, so reset detection should trust it.
+    # Tests of the unverified path drive an unverified sample which clears this.
+    app._prev_verified = True
     return app
 
 
@@ -2226,7 +2230,8 @@ class TestStartupCommand(unittest.TestCase):
         """After an initial session fallback, the startup command fires on the
         FIRST verified live (api) sample - not delayed to the second api poll."""
         session_data = {'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'session'}
-        api_data = {'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api'}
+        # Verified live sample (account_id matches the setUp profile uuid 'uuid-1').
+        api_data = {'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'uuid-1'}
         self.app.cache.update.side_effect = [
             UpdateResult(data=session_data),
             UpdateResult(data=api_data),
@@ -2307,6 +2312,21 @@ class TestStartupCommand(unittest.TestCase):
     @patch('usage_monitor_for_codex.app.run_event_command')
     @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_codex.app.load_tray_icon')
+    def test_startup_fires_when_account_verified(self, _icon, _tooltip, mock_cmd):
+        """When the live sample's account positively matches the cached profile,
+        the startup command fires (the fail-closed gate allows verified samples)."""
+        self.app.cache.profile = {'account': {'uuid': 'acct-V', 'email': 'v@example.com'}}
+        self.app.cache.update.return_value = UpdateResult(
+            data={'five_hour': {'utilization': 0.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-V'},
+        )
+        self.app.update()
+        mock_cmd.assert_called_once()
+        self.assertTrue(self.app._first_update_done)
+
+    @patch('usage_monitor_for_codex.app.ON_STARTUP_COMMAND', ['echo startup'])
+    @patch('usage_monitor_for_codex.app.run_event_command')
+    @patch('usage_monitor_for_codex.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_codex.app.load_tray_icon')
     def test_no_extra_usage_env_vars_when_disabled(self, _icon, _tooltip, mock_cmd):
         """Extra usage env vars are not emitted when extra_usage is disabled."""
         data = {
@@ -2366,9 +2386,14 @@ class TestSourceSwitchGuard(unittest.TestCase):
 
     def _feed(self, util: float, source: str) -> None:
         self.app.cache = MagicMock()
-        self.app.cache.update.return_value = UpdateResult(
-            data={'five_hour': {'utilization': util, 'resets_at': ''}, 'source': source},
-        )
+        data = {'five_hour': {'utilization': util, 'resets_at': ''}, 'source': source}
+        if source == 'api':
+            # A verified live sample: stamp the account and a matching profile so the
+            # identity gate trusts it. These tests exercise source-switch / alert
+            # logic, not the identity gate (which has its own dedicated tests).
+            self.app.cache.profile = {'account': {'uuid': 'acct-feed', 'email': 'e@example.com'}}
+            data['account_id'] = 'acct-feed'
+        self.app.cache.update.return_value = UpdateResult(data=data)
         self.app.update()
 
     def test_first_poll_establishes_source_without_switch(self):
@@ -2439,14 +2464,16 @@ class TestSourceSwitchGuard(unittest.TestCase):
         misses it) re-baselines instead of misreading the new account's lower
         usage as a reset of the old account's near-exhausted quota."""
         self.app.cache = MagicMock()
-        self.app.cache.profile = {'account': {'uuid': 'uuid-fixed', 'email': 'x@example.com'}}
+        # Profile matches the FIRST sample's account (acct-A), so it is verified and
+        # processed; the SECOND sample's account_id change is what must re-baseline.
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
         self.app.cache.update.side_effect = [
             UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),
             UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-B'}),
         ]
-        self.app.update()  # account A near its limit
+        self.app.update()  # account A near its limit (verified)
         self.app.icon.notify.reset_mock()
-        self.app.update()  # account B (same token/uuid) low usage -> re-baseline, NOT a reset
+        self.app.update()  # account B (account_id changed) low usage -> re-baseline, NOT a reset
         self.app.icon.notify.assert_not_called()
         self.assertEqual(self.app._prev_utilization, {'five_hour': 5.0})
 
@@ -2480,6 +2507,61 @@ class TestSourceSwitchGuard(unittest.TestCase):
         )
         self.app.update()  # usage acct-A @96% but profile acct-B -> mismatch -> suppressed
         self.app.icon.notify.assert_not_called()
+
+    def test_unidentified_live_sample_suppresses_events(self):
+        """A live sample with NO account_id, against a known profile account, cannot
+        be verified (fail-closed) and is re-baselined - no threshold notification
+        fires even at high utilization."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-B', 'email': 'b@example.com'}}
+        self.app.cache.update.return_value = UpdateResult(
+            data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api'},  # no account_id
+        )
+        self.app.update()
+        self.app.icon.notify.assert_not_called()
+
+    def test_unverified_sample_does_not_seed_false_reset(self):
+        """An unidentified live sample's utilization must NOT become the baseline for
+        a reset: an unverified api@97 then a verified api@5 is not a reset, because
+        the prior baseline was untrusted (only verified->verified drops count)."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 97.0, 'resets_at': ''}, 'source': 'api'}),  # unverified
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # verified
+        ]
+        self.app.update()  # unverified @97 -> suppressed, NOT a trusted baseline
+        self.app.icon.notify.reset_mock()
+        self.app.update()  # verified @5 -> no reset (prior baseline was unverified)
+        self.app.icon.notify.assert_not_called()
+
+    @patch('usage_monitor_for_codex.app.ON_THRESHOLD_COMMAND', ['notify.bat'])
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_unverified_sample_does_not_rearm_threshold(self):
+        """An unverified live sample must NOT lower (re-arm) a threshold that a
+        previously *verified* sample already notified. Otherwise the next verified
+        high sample is misread as a fresh crossing and re-runs on_threshold_command.
+
+        Repro: verified api@96 (notifies + commands at 95) -> unverified api@5 (no
+        account_id) -> verified api@96 again. The middle (display-only) sample must
+        not reset the seeded baseline to 0, so the final sample stays silent.
+        """
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.side_effect = [
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # verified -> notifies 95
+            UpdateResult(data={'five_hour': {'utilization': 5.0, 'resets_at': ''}, 'source': 'api'}),  # unverified (no account_id) -> must not re-arm
+            UpdateResult(data={'five_hour': {'utilization': 96.0, 'resets_at': ''}, 'source': 'api', 'account_id': 'acct-A'}),  # verified high again -> must NOT re-fire
+        ]
+        self.app.update()  # verified @96 -> crosses 95: notifies + runs command
+        self.assertEqual(self.app._notified_thresholds.get('five_hour'), 95)
+        self.app.icon.notify.reset_mock()
+        self._cmd.reset_mock()
+        self.app.update()  # unverified @5 -> suppressed; baseline must STAY at 95
+        self.assertEqual(self.app._notified_thresholds.get('five_hour'), 95)
+        self.app.update()  # verified @96 -> already notified at 95: no re-fire
+        self.app.icon.notify.assert_not_called()
+        self._cmd.assert_not_called()
 
     def test_repeated_flapping_does_not_fire(self):
         """Every poll being a source switch suppresses alerts entirely (no spurious fire)."""

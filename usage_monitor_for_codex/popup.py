@@ -217,12 +217,19 @@ def _snapshot_to_dict(
     usage_data = snap.usage or {}
     source = usage_data.get('source')
     profile_uuid = snap.profile.get('account', {}).get('uuid') if snap.profile else None
-    account_mismatch = (
+    # Fail-CLOSED for billing-sensitive display: show the account block + Credits
+    # only when the live data's account is POSITIVELY verified to match the cached
+    # profile (api source, both ids present and equal). A session source, an
+    # account mismatch, OR an unverifiable identity (missing account_id or profile
+    # uuid on live data) all hide them - the usage bars still show. Non-api / no-data
+    # states (e.g. first load before any fetch) are not gated here: there is no
+    # live account or Credits to misattribute yet.
+    identity_verified = (
         source == 'api'
         and bool(usage_data.get('account_id')) and bool(profile_uuid)
-        and usage_data.get('account_id') != profile_uuid
+        and usage_data.get('account_id') == profile_uuid
     )
-    hide_account = source == 'session' or account_mismatch
+    hide_account = source == 'session' or (source == 'api' and not identity_verified)
     if snap.profile and not hide_account:
         account = snap.profile.get('account', {})
         org = snap.profile.get('organization', {})
