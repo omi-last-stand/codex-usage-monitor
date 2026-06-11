@@ -19,6 +19,7 @@ dist/
 .idea/
 
 # Claude Code (local harness / dev settings - not part of the app)
+CLAUDE.md
 .claude/settings.json
 .claude/settings.local.json
 .claude/launch.json
