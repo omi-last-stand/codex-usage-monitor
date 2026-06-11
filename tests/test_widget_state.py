@@ -58,6 +58,48 @@ class TestAlwaysOnTop(_TempIni):
         self.assertIs(ws.load_widget_state().always_on_top, False)
 
 
+class TestCorruptIni(_TempIni):
+    """Externally corrupted INI files must yield defaults, never exceptions -
+    load_language() runs at module import (i18n bootstrap), so an escaping
+    error here kills the app before any window exists."""
+
+    def test_utf16_ini_yields_defaults(self):
+        """A file re-saved as UTF-16 (old Notepad "Unicode") is not valid
+        UTF-8; the UnicodeDecodeError must not escape _read()."""
+        self.ini.write_bytes('[window]\nx = 100\ny = 200\n'.encode('utf-16'))
+        state = ws.load_widget_state()
+        self.assertIsNone(state.window_x)
+        self.assertIsNone(state.window_y)
+        self.assertEqual(ws.load_language(), '')
+
+    def test_invalid_utf8_bytes_yield_defaults(self):
+        self.ini.write_bytes(b'\xff\xfe\x00broken')
+        self.assertIsNone(ws.load_widget_state().window_x)
+
+    def test_percent_in_values_does_not_raise(self):
+        """A stray '%' (interpolation syntax) anywhere in the file must not
+        raise at get() time - with interpolation disabled it reads literally."""
+        self.ini.write_text(
+            '[window]\nx = %(broken\ny = 200\n'
+            '[widget]\nlanguage = 50%\n'
+            '[fields]\naccount = %visible\n',
+            encoding='utf-8',
+        )
+        state = ws.load_widget_state()
+        # x is not an int -> both coordinates fall back together.
+        self.assertIsNone(state.window_x)
+        self.assertIsNone(state.window_y)
+        self.assertEqual(state.field_states, {})  # '%visible' is not a valid state
+        self.assertEqual(ws.load_language(), '50%')
+
+    def test_percent_roundtrip_preserved_on_save(self):
+        """Saving through a parser that read '%' values must not corrupt them."""
+        self.ini.write_text('[widget]\nlanguage = 50%\n', encoding='utf-8')
+        ws.save_window_position(10, 20)
+        self.assertEqual(ws.load_language(), '50%')
+        self.assertEqual(ws.load_widget_state().window_x, 10)
+
+
 class TestCrossPreservation(_TempIni):
     """Each save must preserve the other sections of the INI."""
 

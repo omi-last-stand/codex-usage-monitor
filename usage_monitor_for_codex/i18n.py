@@ -6,8 +6,10 @@ Loads translations for the detected system language with English fallback.
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import locale
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,24 +17,64 @@ __all__ = ['LOCALE_DIR', 'detect_lang_code', 'load_translations', 'T']
 
 LOCALE_DIR = Path(__file__).parent.parent / 'locale'
 
+# Manual overrides for Windows legacy language names that locale.normalize()
+# has no alias for (it knows 'german' but none of these), so they would all
+# silently fall back to English despite shipped translations.
+_WINDOWS_LANG_OVERRIDES = {
+    'ukrainian': 'uk',
+    'chinese (simplified)': 'zh-CN',
+    'chinese (traditional)': 'zh-TW',
+    'hindi': 'hi',
+    'indonesian': 'id',
+}
+
+
+def _windows_user_locale() -> str:
+    """Return the user-default locale as a BCP-47 tag (``'zh-CN'``), or ``''``.
+
+    ``locale.getlocale()`` reports the legacy CRT name (e.g.
+    ``'Chinese (Simplified)_China'``) which ``locale.normalize()`` cannot map
+    for several shipped languages; ``GetUserDefaultLocaleName`` reports the
+    modern tag that matches the locale filenames directly.
+    """
+    if sys.platform != 'win32':
+        return ''
+    try:
+        buf = ctypes.create_unicode_buffer(85)  # LOCALE_NAME_MAX_LENGTH
+        if ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, len(buf)) > 0:
+            return buf.value
+    except Exception:
+        pass
+    return ''
+
 
 def detect_lang_code(lang: str) -> str:
     """Detect locale file code from system locale string using convention-based lookup.
 
-    Lookup chain: ``{lang}-{REGION}.json`` → ``{lang}.json`` → ``en.json``.
-    No mapping required - the locale directory structure *is* the configuration.
+    Lookup chain: exact ``{lang}.json`` (BCP-47 tags) → ``{lang}-{REGION}.json``
+    → ``{lang}.json`` → ``en.json``.  No mapping required - the locale
+    directory structure *is* the configuration.
 
     Parameters
     ----------
     lang : str
-        System locale string, e.g. ``'de_DE'`` or ``'German_Germany'``.
+        System locale string, e.g. ``'de_DE'``, ``'German_Germany'`` or ``'zh-CN'``.
 
     Returns
     -------
     str
         Locale file code (without ``.json``).
     """
-    normalized = locale.normalize(lang).split('.')[0]
+    lang = lang.split('.')[0].strip()
+    if not lang:
+        return 'en'
+
+    # A BCP-47 tag ('zh-CN' from GetUserDefaultLocaleName, or a regional code
+    # like 'pt-BR') may name a locale file directly.
+    if (LOCALE_DIR / f'{lang}.json').exists():
+        return lang
+
+    normalized = locale.normalize(lang.replace('-', '_')).split('.')[0]
     parts = normalized.split('_', 1)
     base = parts[0].lower()
 
@@ -41,9 +83,7 @@ def detect_lang_code(lang: str) -> str:
     if len(base) > 3:
         base = locale.normalize(parts[0]).split('.')[0].split('_')[0].lower()
 
-    # Manual overrides for Windows locales that do not normalize cleanly to ISO codes.
-    if base == 'ukrainian':
-        base = 'uk'
+    base = _WINDOWS_LANG_OVERRIDES.get(base, base)
 
     region = parts[1] if len(parts) > 1 and len(base) <= 3 else ''
 
@@ -79,7 +119,15 @@ def load_translations() -> dict[str, Any]:
             code = candidate
             break
     if not code:
-        lang = locale.getlocale()[0] or ''
+        lang = _windows_user_locale()
+        if not lang:
+            try:
+                lang = locale.getlocale()[0] or ''
+            except ValueError:
+                # getlocale() raises on locale strings it cannot parse (e.g.
+                # LC_CTYPE holding a BCP-47 tag like 'zh-CN'); this runs at
+                # module import, so it must never propagate.
+                lang = ''
         code = detect_lang_code(lang)
 
     try:

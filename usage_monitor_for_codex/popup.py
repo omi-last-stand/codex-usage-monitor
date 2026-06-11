@@ -493,7 +493,7 @@ class UsagePopup:
 
         api = _PopupApi(self)
 
-        self._window = webview.create_window(
+        window = webview.create_window(
             '', url=str(_POPUP_DIR / 'popup.html'),
             width=self.WIDTH, height=initial_height,
             resizable=False, frameless=True, shadow=False,
@@ -502,6 +502,12 @@ class UsagePopup:
             background_color=BG,
             js_api=api,
         )
+        if window is None:
+            # create_window is annotated `Window | None`; in-process creation
+            # returns a Window. Fail loudly (caught by _open_popup's crash_log)
+            # rather than attribute-by-attribute if that contract ever changes.
+            raise RuntimeError('webview.create_window returned no window')
+        self._window = window
         self._shown = False
         self._window.events.loaded += self._on_loaded
         self._window.events.closed += self._on_window_closed
@@ -814,7 +820,7 @@ class SettingsWindow:
 
     def __init__(self, app: UsageMonitorForCodex) -> None:
         self.app = app
-        self._window = webview.create_window(
+        window = webview.create_window(
             T['settings_title'],
             url=str(_POPUP_DIR / 'settings.html'),
             width=self.WIDTH, height=self.HEIGHT,
@@ -822,6 +828,10 @@ class SettingsWindow:
             background_color=BG,
             js_api=_SettingsApi(self),
         )
+        if window is None:
+            # See UsagePopup.__init__: annotated Optional, never None in-process.
+            raise RuntimeError('webview.create_window returned no window')
+        self._window = window
         self._window.events.loaded += self._on_loaded
         self._window.events.closed += self._on_closed
 

@@ -81,6 +81,12 @@ class UsageMonitorForCodex:
         # passed deadline (the server has not advanced it) is not repeatedly re-counted
         # as an unconfirmed overdue reset. Reset on a verified account switch.
         self._reset_confirmed: dict[str, str] = {}
+        # Per window: when it FIRST went missing from verified responses (cleared
+        # the moment it is present again). The ageing signal that lets Phase 4
+        # retire a DEADLINE-LESS retained entry once its absence exceeds its own
+        # window length - such an entry has no other retirement path. Account-
+        # scoped (reset on a verified account switch) like its companions.
+        self._absent_since: dict[str, datetime] = {}
 
         # Adaptive polling state
         self._fast_polls_remaining = 0
@@ -254,6 +260,10 @@ class UsageMonitorForCodex:
                         self.update()
                 threading.Thread(target=_bg_refresh, daemon=True).start()
             UsagePopup(self)
+        except Exception:
+            # Mirror _open_settings_window: this runs on a daemon thread, so an
+            # unreported failure here means the widget silently never opens.
+            crash_log(traceback.format_exc())
         finally:
             self._popup_closed_at = time.time()
             self._popup_open = False
@@ -269,6 +279,41 @@ class UsageMonitorForCodex:
         self.icon.title = format_tooltip(self._last_response)
 
     # Update orchestration
+
+    @staticmethod
+    def _same_deadline(rs_a: str | None, rs_b: str | None) -> bool:
+        """Return True when two ISO ``resets_at`` strings denote the SAME period
+        boundary.
+
+        Compared with a tolerance rather than byte equality:
+        ``transform_rate_limits`` may derive ``resets_at`` from a RELATIVE
+        countdown (``resets_in_seconds`` etc.), which yields a slightly
+        different absolute string each poll within the same period. The 600 s
+        tolerance absorbs that jitter / minor server clock adjustment and is an
+        order of magnitude below the smallest window (5 h), so a genuine
+        reset's forward jump is never within it. Used by the in-period dip
+        classifier, Phase 4's same-period KEEP guard, and the reset-confirmed
+        bookkeeping, so all three classify a drifting deadline identically.
+        """
+        if not rs_a or not rs_b:
+            return False
+        if rs_a == rs_b:
+            return True
+        try:
+            dt_a = datetime.fromisoformat(rs_a)
+            dt_b = datetime.fromisoformat(rs_b)
+        except (ValueError, TypeError):
+            return False
+        return abs((dt_b - dt_a).total_seconds()) <= 600
+
+    @staticmethod
+    def _window_length_seconds(key: str) -> float:
+        """Length of *key*'s usage window in seconds (the longest shipped
+        window, 7 days, for an unparseable slot key like ``primary``) - the
+        upper bound on how long a retained value can stay meaningful: no
+        window outlives its own period."""
+        period = field_period(key)
+        return float(period) if period else 7 * 24 * 3600.0
 
     def _is_in_period_dip(self, key: str, data: dict[str, Any], now: datetime) -> bool:
         """Return True when ``key``'s utilization change is a dip WITHIN the current
@@ -304,17 +349,15 @@ class UsageMonitorForCodex:
             return False
         try:
             retained_dt = datetime.fromisoformat(retained_rs)
-            current_dt = datetime.fromisoformat(current_rs)
         except (ValueError, TypeError):
             return False
         if retained_dt <= now:
             return False  # retained deadline already passed -> overdue, a genuine reset
-        # Same active period iff the deadline has not jumped forward into a new period.
-        # 600s absorbs relative-countdown jitter / minor server clock adjustment and is
-        # an order of magnitude below the smallest window (5h), so a genuine reset's
-        # forward jump is never mistaken for the same period.
-        same_period_tolerance_s = 600
-        return abs((current_dt - retained_dt).total_seconds()) <= same_period_tolerance_s
+        # Same active period iff the deadline has not jumped forward into a new
+        # period (see _same_deadline for the tolerance rationale; an unparseable
+        # current deadline compares unequal there -> treated as a genuine reset,
+        # matching the previous behaviour).
+        return self._same_deadline(current_rs, retained_rs)
 
     def update(self) -> None:
         """Request a data refresh from the cache and process the result."""
@@ -375,7 +418,10 @@ class UsageMonitorForCodex:
         # returns at the identity gate.
         self.cache.ensure_profile()
         current_profile = self.cache.profile
-        current_account_uuid = current_profile.get('account', {}).get('uuid') if isinstance(current_profile, dict) else None
+        account = current_profile.get('account') if isinstance(current_profile, dict) else None
+        if not isinstance(account, dict):
+            account = {}
+        current_account_uuid = account.get('uuid')
         if self._prev_account_uuid is not None and current_account_uuid is not None and current_account_uuid != self._prev_account_uuid:
             # Drop the OLD account's deferred notifications BEFORE enqueueing the
             # switch notice below: while the user was away, a reset/threshold
@@ -383,7 +429,7 @@ class UsageMonitorForCodex:
             # return would surface a stale, misattributed alert against the now-
             # displayed account B (the same cross-account leak this block prevents).
             self._deferred_notifications.clear()
-            email = current_profile.get('account', {}).get('email', '')
+            email = account.get('email', '')
             message = T['notify_account_switched'].format(email=email) if email else T['notify_account_switched_title']
             self._notify_or_defer('account_switched', message, T['notify_account_switched_title'])
             # Clear ALL account-scoped trusted state so no old-account value leaks
@@ -394,6 +440,7 @@ class UsageMonitorForCodex:
             self._notified_thresholds = {}
             self._prev_extra_usage_pct = None
             self._reset_confirmed = {}
+            self._absent_since = {}
             # A pending reset belongs to the OLD account; the new account has its own
             # deadlines. Leaving this set would keep idle/locked polling alive for a
             # switched-to account that has no due reset (unnecessary background wakes).
@@ -466,6 +513,39 @@ class UsageMonitorForCodex:
                 reset_candidates[key] = 0.0
                 expired_absent.add(key)
 
+        # Track how long each retained window has been ABSENT from verified
+        # responses. A deadline-less retained entry cannot be expiry-evaluated
+        # or deadline-retired, so this is its only ageing signal: within its
+        # own window length the last-known value keeps blocking (a transient
+        # partial omission, review 1919); beyond it the period has CERTAINLY
+        # ended - no window outlives its own length.
+        for key in list(self._absent_since):
+            if key in quota_fields or key not in self._prev_entries:
+                self._absent_since.pop(key, None)
+        for key in self._prev_entries:
+            if key not in quota_fields and key not in self._absent_since:
+                self._absent_since[key] = now
+
+        # Retire aged-out DEADLINE-LESS ghosts BEFORE the blocking view below
+        # is snapshotted: on the very poll a ghost crosses its age horizon, a
+        # sibling's genuine reset arriving in the SAME response must not be
+        # suppressed by it - a suppressed reset command is never replayed, so
+        # it would be lost permanently. A >=99 deadline-less ghost retained
+        # past its horizon would otherwise suppress every other window's reset
+        # events forever (it has no other retirement path). A genuine return
+        # later seeds a fresh baseline like any first observation.
+        for key in list(self._prev_entries):
+            entry = self._prev_entries.get(key)
+            if not isinstance(entry, dict) or entry.get('resets_at'):
+                continue
+            absent_from = self._absent_since.get(key)
+            if (absent_from is not None
+                    and (now - absent_from).total_seconds() > self._window_length_seconds(key)):
+                self._prev_utilization.pop(key, None)
+                self._prev_entries.pop(key, None)
+                self._notified_thresholds.pop(key, None)
+                self._absent_since.pop(key, None)
+
         # "Is another window still blocking?" uses best-known current utilization:
         # an expired-absent window counts as 0 (it reset), a present window at its
         # current pct, any other retained window at its last-known value. Snapshot it
@@ -521,6 +601,7 @@ class UsageMonitorForCodex:
                 self._prev_utilization.pop(key, None)
                 self._prev_entries.pop(key, None)
                 self._notified_thresholds.pop(key, None)
+                self._absent_since.pop(key, None)
 
         # Phase 3: notify + run the reset command for each firing window. Whether to
         # clear the idle reset-wait is decided once after Phase 4 (a fired reset alone
@@ -551,6 +632,10 @@ class UsageMonitorForCodex:
             entry = self._prev_entries.get(key)
             resets_at = entry.get('resets_at') if isinstance(entry, dict) else None
             if not resets_at:
+                # No deadline -> nothing to expiry-evaluate here. Ageing-out of
+                # deadline-less ABSENT entries happens before the blocking
+                # snapshot above (it must not suppress a same-poll sibling
+                # reset); a PRESENT one keeps refreshing through the merge.
                 continue
             try:
                 if datetime.fromisoformat(resets_at) > now:
@@ -563,7 +648,7 @@ class UsageMonitorForCodex:
             had_overdue = True
             current = result.data.get(key)
             if (isinstance(current, dict) and current.get('utilization') is not None
-                    and current.get('resets_at') == resets_at):
+                    and self._same_deadline(current.get('resets_at'), resets_at)):
                 # The same already-passed deadline is still reported (the server has
                 # not advanced the period yet): not a rollover, keep the baseline so
                 # the lingering value is not misread as a fresh period. This window is
@@ -579,12 +664,13 @@ class UsageMonitorForCodex:
                 if parsed_keep is not None:
                     keep_threshold = 95 if parsed_keep[1] == 'hour' else 98
                     if ((current.get('utilization') or 0) > keep_threshold
-                            and self._reset_confirmed.get(key) != resets_at):
+                            and not self._same_deadline(self._reset_confirmed.get(key), resets_at)):
                         still_awaiting = True
                 continue
             self._prev_utilization.pop(key, None)
             self._prev_entries.pop(key, None)
             self._notified_thresholds.pop(key, None)
+            self._absent_since.pop(key, None)
 
         # Single decision point for the idle/lock reset-deadline wait. _idle_reset_pending
         # is scheduler state ("an overdue reset still needs confirming"), not an event.
@@ -674,10 +760,19 @@ class UsageMonitorForCodex:
             self.icon.notify(message, title)
 
     def _flush_deferred_notifications(self) -> None:
-        """Show all deferred notifications and clear the queue."""
-        for message, title in self._deferred_notifications.values():
+        """Show all deferred notifications and clear the queue.
+
+        Drained via ``popitem()`` rather than iterated: ``_notify_or_defer``
+        can insert concurrently from a popup-thread ``update()``, and a dict
+        mutated mid-iteration raises RuntimeError - out of the poll loop,
+        killing polling for good.
+        """
+        while self._deferred_notifications:
+            try:
+                _category, (message, title) = self._deferred_notifications.popitem()
+            except KeyError:
+                break
             self.icon.notify(message, title)
-        self._deferred_notifications.clear()
 
     def _check_threshold_alerts(self, data: dict[str, Any]) -> None:
         """Show a notification when usage crosses a configured threshold.
@@ -924,6 +1019,42 @@ class UsageMonitorForCodex:
 
         return earliest
 
+    def _has_unconfirmed_overdue(self) -> bool:
+        """Return True when a retained window's reset is OVERDUE and unconfirmed.
+
+        ``_seconds_until_next_reset()`` ignores PAST deadlines, and
+        ``_idle_reset_pending`` is armed only inside the away-branch - so when a
+        deadline passes while the user is still ACTIVE and they lock before the
+        next poll evaluates it, neither signal exists and the idle wait would
+        block with no deadline: ``on_reset_command`` would fire only when the
+        user returns. This predicate closes that gap from RETAINED state alone
+        (no fresh response is available at scheduling time), mirroring Phase 4's
+        still-awaiting gate: the window must be command-eligible (parseable
+        key), its retained value above the reset threshold (no drop observed
+        yet), its retained deadline passed, and that deadline not already
+        recorded in ``_reset_confirmed``.
+        """
+        now = datetime.now(timezone.utc)
+        for key, entry in self._prev_entries.items():
+            if not isinstance(entry, dict):
+                continue
+            resets_at = entry.get('resets_at')
+            if not resets_at:
+                continue
+            try:
+                if datetime.fromisoformat(resets_at) > now:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            parsed = parse_field_name(key)
+            if parsed is None:
+                continue
+            threshold = 95 if parsed[1] == 'hour' else 98
+            if ((entry.get('utilization') or 0) > threshold
+                    and not self._same_deadline(self._reset_confirmed.get(key), resets_at)):
+                return True
+        return False
+
     def _calculate_poll_interval(self) -> int:
         """Determine the next poll interval based on current state.
 
@@ -948,8 +1079,12 @@ class UsageMonitorForCodex:
         # The +5s buffer guards against minor timing differences
         # (clocks, caches, processing delays). Follow-up uses POLL_FAST
         # regardless of user activity (quota was likely exhausted).
+        # Healthy responses only: after an error the POLL_ERROR retry must not
+        # be slowed to >=POLL_FAST by alignment (error recovery and the
+        # post-reset reading are both time-critical), and a rate-limit backoff
+        # must never be shortened below the server's Retry-After.
         next_reset = self._seconds_until_next_reset()
-        if next_reset is not None and next_reset + 5 <= interval * 1.5:
+        if 'error' not in data and next_reset is not None and next_reset + 5 <= interval * 1.5:
             interval = max(int(next_reset) + 5, POLL_FAST)
             self._fast_polls_remaining = max(self._fast_polls_remaining, 2)
 
@@ -990,7 +1125,16 @@ class UsageMonitorForCodex:
 
             target = time.time() + interval
             self._next_poll_time = target
-            while self.running and time.time() < target:
+            while self.running:
+                now_wall = time.time()
+                if now_wall >= target:
+                    break
+                if target - now_wall > interval + 1:
+                    # The wall clock stepped BACKWARDS: the remaining wait just
+                    # grew beyond the intended interval and would stall polling
+                    # for the size of the step. Re-anchor from now.
+                    target = now_wall + interval
+                    self._next_poll_time = target
                 time.sleep(1)
                 # If another thread (popup) fetched successfully,
                 # push the next poll forward to avoid a redundant
@@ -1019,7 +1163,12 @@ class UsageMonitorForCodex:
                         if next_reset is not None:
                             reset_deadline = time.time() + next_reset + 5
                             self._idle_reset_pending = True
-                        elif self._idle_reset_pending:
+                        elif self._idle_reset_pending or self._has_unconfirmed_overdue():
+                            # _idle_reset_pending covers a deadline armed while
+                            # away; _has_unconfirmed_overdue covers one that
+                            # passed while the user was still ACTIVE (never
+                            # armed) before they locked - both keep the retry
+                            # poll alive until update() confirms the reset.
                             reset_deadline = time.time() + POLL_INTERVAL
 
                     self._wait_for_activity(until=reset_deadline)

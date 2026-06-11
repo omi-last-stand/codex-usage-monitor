@@ -19,9 +19,20 @@ import usage_monitor_for_codex.autostart as autostart_mod
 class TestShortcutPath(unittest.TestCase):
     """Tests for _shortcut_path()."""
 
+    @patch.object(autostart_mod, '_known_folder_startup', return_value=Path(r'D:\Redirected\Startup'))
+    def test_known_folder_wins(self, _mock_kf):
+        """The SHGetKnownFolderPath result is authoritative: with GPO Folder
+        Redirection the real Startup folder is NOT under %APPDATA%, and a
+        shortcut written there would never run at logon."""
+        self.assertEqual(
+            autostart_mod._shortcut_path(),
+            Path(r'D:\Redirected\Startup') / 'CodexUsageMonitor.lnk',
+        )
+
+    @patch.object(autostart_mod, '_known_folder_startup', return_value=None)
     @patch.dict('os.environ', {'APPDATA': r'C:\Users\me\AppData\Roaming'})
-    def test_points_into_startup_folder(self):
-        """Shortcut path is the named .lnk inside the Startup folder."""
+    def test_falls_back_to_appdata_when_api_unavailable(self, _mock_kf):
+        """Without the known-folder API the legacy %APPDATA% composition is used."""
         path = autostart_mod._shortcut_path()
 
         self.assertEqual(
@@ -31,10 +42,19 @@ class TestShortcutPath(unittest.TestCase):
             / 'CodexUsageMonitor.lnk',
         )
 
+    @patch.object(autostart_mod, '_known_folder_startup', return_value=None)
     @patch.dict('os.environ', {'APPDATA': r'C:\Users\me\AppData\Roaming'})
-    def test_uses_lnk_filename(self):
+    def test_uses_lnk_filename(self, _mock_kf):
         """Shortcut file name ends in .lnk."""
         self.assertEqual(autostart_mod._shortcut_path().name, 'CodexUsageMonitor.lnk')
+
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows-only API')
+    def test_known_folder_resolves_on_windows(self):
+        """The real SHGetKnownFolderPath call returns the Startup folder."""
+        folder = autostart_mod._known_folder_startup()
+        self.assertIsNotNone(folder)
+        assert folder is not None
+        self.assertEqual(folder.name.lower(), 'startup')
 
 
 class TestPsLiteral(unittest.TestCase):

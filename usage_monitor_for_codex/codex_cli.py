@@ -129,7 +129,14 @@ def find_installations() -> list[CodexInstallation]:
         best_version = ''
         best_parts: tuple[int, ...] = ()
         best_path = None
-        for entry in ext_dir.iterdir():
+        try:
+            entries = list(ext_dir.iterdir())
+        except OSError:
+            # Enumeration can fail even after is_dir() (ACL denial, cloud
+            # placeholder, dir deleted in between); one bad extension dir
+            # must not take down the caller's update loop.
+            continue
+        for entry in entries:
             if not entry.name.startswith(_EXTENSION_PREFIX):
                 continue
             remainder = entry.name[len(_EXTENSION_PREFIX):]
@@ -170,10 +177,15 @@ def cli_version(path: Path) -> str:
     """
     try:
         mtime = path.stat().st_mtime
-        cached = _version_cache.get(path)
-        if cached and cached[0] == mtime:
-            return cached[1]
+    except OSError:
+        return ''
 
+    cached = _version_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    version = ''
+    try:
         proc = subprocess.run(
             [str(path), '--version'],
             capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW,
@@ -182,7 +194,12 @@ def cli_version(path: Path) -> str:
         output = (proc.stdout or '') + (proc.stderr or '')
         match = re.search(r'(\d+\.\d+\.\d+)', output)
         version = match.group(1) if match else ''
-        _version_cache[path] = (mtime, version)
-        return version
     except Exception:
-        return ''
+        # Fall through to cache the failure: this is called on EVERY usage
+        # fetch (via the User-Agent) and popup refresh, so a persistently
+        # hanging `codex --version` (AV sandboxing, broken node shim) must
+        # not re-block for the full 10 s timeout each time. Like the
+        # versionless-output case, probe once per binary change.
+        pass
+    _version_cache[path] = (mtime, version)
+    return version

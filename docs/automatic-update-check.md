@@ -78,7 +78,7 @@ Add the script to your [`usage-monitor-settings.json`](configuration.md). Choose
 
 ```json
 {
-  "on_reset_command": "powershell -ExecutionPolicy Bypass -File .\\check-update.ps1 && if not \"%USAGE_MONITOR_VARIANT%\"==\"seven_day\" exit /b"
+  "on_reset_command": "if \"%USAGE_MONITOR_VARIANT%\"==\"seven_day\" powershell -ExecutionPolicy Bypass -File .\\check-update.ps1"
 }
 ```
 

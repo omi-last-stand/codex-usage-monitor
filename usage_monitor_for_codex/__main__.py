@@ -18,7 +18,13 @@ if _verbose and getattr(sys, 'frozen', False):
 
 # Per-Monitor V2 must be set before pywebview's legacy SetProcessDPIAware() call,
 # which only sets SYSTEM_DPI_AWARE and breaks native menu hover at high DPI.
-ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_ssize_t(-4))
+try:
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_ssize_t(-4))
+except (AttributeError, OSError):
+    # Not available before Windows 10 1703. DPI awareness is an enhancement;
+    # failing here at module level would kill the noconsole exe silently,
+    # before crash_log even exists.
+    pass
 
 if _verbose:
     from usage_monitor_for_codex.verbose import print_startup_diagnostics
@@ -94,19 +100,23 @@ try:
     if app and app.restart_requested:
         release_instance_lock()
 
+        # Forward our own arguments (e.g. --verbose) so a tray Restart - the
+        # documented way to reload settings, and the path the automatic
+        # language-change restart takes - does not silently drop diagnostics.
+        forwarded_args = sys.argv[1:]
         if getattr(sys, 'frozen', False):
             # Clear PyInstaller's internal env vars so the new
             # instance extracts to a fresh temp directory instead
             # of reusing the current (soon-to-be-deleted) one.
             env = {k: v for k, v in os.environ.items() if not k.startswith(('_PYI_', '_MEI'))}
             subprocess.Popen(
-                [sys.executable],
+                [sys.executable, *forwarded_args],
                 env=env,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
         else:
             subprocess.Popen(
-                [sys.executable, '-m', 'usage_monitor_for_codex'],
+                [sys.executable, '-m', 'usage_monitor_for_codex', *forwarded_args],
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
 except Exception:

@@ -84,15 +84,15 @@ class TestLoadSettings(unittest.TestCase):
         with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp, TemporaryDirectory() as config_tmp:
             codex_dir = Path(home_tmp) / '.codex'
             codex_dir.mkdir()
-            (codex_dir / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'bg': '#home'}), encoding='utf-8')
-            (Path(config_tmp) / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'bg': '#custom'}), encoding='utf-8')
+            (codex_dir / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'bg': '#101010'}), encoding='utf-8')
+            (Path(config_tmp) / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'bg': '#202020'}), encoding='utf-8')
             fake_file = str(Path(app_tmp) / 'usage_monitor_for_codex' / 'settings.py')
             with patch.object(settings_mod, '__file__', fake_file), \
                  patch.object(Path, 'home', return_value=Path(home_tmp)), \
                  patch.dict('os.environ', {'CODEX_HOME': config_tmp}), \
                  patch.object(settings_mod, 'ctypes', MagicMock()):
                 result = settings_mod._load_settings()
-        self.assertEqual(result['bg'], '#custom')
+        self.assertEqual(result['bg'], '#202020')
 
     def test_config_dir_same_as_home_codex_no_duplicate(self):
         """When CODEX_HOME equals ~/.codex/, the path is searched only once."""
@@ -313,6 +313,34 @@ class TestSettingsValidation(unittest.TestCase):
         """Non-string value for color key is dropped."""
         result, _ = self._run_validate({'bg': 42})
         self.assertNotIn('bg', result)
+
+    def test_non_hex_bg_dropped(self):
+        """bg backs the NATIVE window: pywebview raises on anything but #RGB /
+        #RRGGBB, which would silently kill the widget in its daemon thread.
+        Named colors, missing '#', and 8-digit CSS hex must all be dropped
+        with the usual MessageBox instead."""
+        for bad in ('navy', '0f1838', '#0f1838cc', '#12 34', '#'):
+            with self.subTest(bg=bad):
+                result, mock = self._run_validate({'bg': bad})
+                self.assertNotIn('bg', result)
+                mock.windll.user32.MessageBoxW.assert_called_once()
+
+    def test_valid_hex_bg_kept(self):
+        """3- and 6-digit hex bg values pass through."""
+        for good in ('#000', '#0f1838', '#ABCDEF'):
+            with self.subTest(bg=good):
+                result, mock = self._run_validate({'bg': good})
+                self.assertEqual(result['bg'], good)
+                mock.windll.user32.MessageBoxW.assert_not_called()
+
+    def test_css_only_colors_stay_free_form(self):
+        """Colors that feed only CSS (incl. the 4-digit-hex defaults like
+        bar_divider '#000c') keep accepting free-form strings - CSS degrades
+        gracefully, and tightening them would reject the shipped defaults."""
+        result, mock = self._run_validate({'bar_divider': '#000c', 'fg': 'tomato'})
+        self.assertEqual(result['bar_divider'], '#000c')
+        self.assertEqual(result['fg'], 'tomato')
+        mock.windll.user32.MessageBoxW.assert_not_called()
 
     def test_unknown_keys_pass_through(self):
         """Unknown keys are not validated or removed."""

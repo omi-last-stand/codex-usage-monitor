@@ -147,7 +147,12 @@ def print_startup_diagnostics() -> None:
 
     # Locale
     _section('Locale')
-    sys_locale = locale.getlocale()
+    try:
+        sys_locale = locale.getlocale()
+    except ValueError:
+        # getlocale() raises on locale strings it cannot parse (e.g. a BCP-47
+        # tag); diagnostics must never take down startup.
+        sys_locale = (None, None)
     _row('System locale', f'{sys_locale[0]}, {sys_locale[1]}' if sys_locale[0] else 'not set')
     _row('Filesystem encoding', sys.getfilesystemencoding())
     _row('Default encoding', sys.getdefaultencoding())

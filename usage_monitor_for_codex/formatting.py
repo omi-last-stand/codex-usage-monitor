@@ -189,13 +189,13 @@ def expand_popup_fields(popup_fields: list[str], usage_data: dict[str, Any]) -> 
     return result
 
 
-def elapsed_pct(resets_at: str, period_seconds: int) -> float | None:
+def elapsed_pct(resets_at: str | None, period_seconds: int) -> float | None:
     """Return elapsed percentage of a usage period, or None if not calculable.
 
     Parameters
     ----------
-    resets_at : str
-        ISO 8601 timestamp when the limit resets.
+    resets_at : str or None
+        ISO 8601 timestamp when the limit resets (``None``/``''`` -> ``None``).
     period_seconds : int
         Total duration of the period in seconds (e.g. 18000 for 5h).
 

@@ -120,6 +120,39 @@ class TestCooldownBehavior(unittest.TestCase):
             result = cache.update()
         self.assertIsNotNone(result.data)
 
+    @patch('usage_monitor_for_codex.cache.fetch_usage', return_value=_SUCCESS_DATA)
+    @patch('usage_monitor_for_codex.cache.time')
+    def test_backward_clock_step_does_not_freeze_cooldown(self, mock_time, mock_fetch):
+        """A wall clock stepped BACKWARDS after a success (manual change, VM
+        resume, NTP step) leaves last_success_time in the future; the negative
+        elapsed must not freeze the cooldown - the next update() re-anchors and
+        fetches instead of silently serving stale data for the step's size."""
+        cache = _make_cache()
+        mock_time.time.return_value = 1000.0
+        cache.update()
+        mock_fetch.reset_mock()
+
+        mock_time.time.return_value = 500.0  # clock stepped back 500s
+        result = cache.update()
+        self.assertIsNotNone(result.data)
+        mock_fetch.assert_called_once()
+
+    @patch('usage_monitor_for_codex.cache.fetch_usage', return_value=_SUCCESS_DATA)
+    @patch('usage_monitor_for_codex.cache.time')
+    def test_last_success_time_property_heals_future_anchor(self, mock_time, mock_fetch):
+        """The last_success_time property self-heals a future (backward-step)
+        anchor so duration arithmetic in the poll loop and popup never goes
+        negative."""
+        cache = _make_cache()
+        mock_time.time.return_value = 1000.0
+        cache.update()
+
+        mock_time.time.return_value = 500.0  # clock stepped back 500s
+        lst = cache.last_success_time
+        self.assertIsNotNone(lst)
+        assert lst is not None
+        self.assertLessEqual(lst, 500.0)
+
     @patch('usage_monitor_for_codex.cache.fetch_usage', return_value=_ERROR_DATA)
     def test_no_cooldown_after_error(self, mock_fetch):
         """Cooldown only applies after success, not after error."""
@@ -385,6 +418,27 @@ class TestRateLimitGuard(unittest.TestCase):
 
         # At 901s: past MAX_BACKOFF cap
         mock_time.time.return_value = 1901.0
+        mock_fetch.return_value = _SUCCESS_DATA
+        result = cache.update()
+        self.assertIsNotNone(result.data)
+
+    @patch('usage_monitor_for_codex.cache.fetch_usage', return_value={'error': 'HTTP 429', 'rate_limited': True, 'retry_after': 600})
+    @patch('usage_monitor_for_codex.cache.time')
+    def test_backoff_capped_after_backward_clock_step(self, mock_time, mock_fetch):
+        """A backward clock step during a 429 backoff must not extend the wait
+        beyond MAX_BACKOFF from now - the remaining window is re-capped."""
+        cache = _make_cache()
+        mock_time.time.return_value = 10000.0
+        cache.update()  # backoff until 10600
+        mock_fetch.reset_mock()
+
+        mock_time.time.return_value = 5000.0  # clock stepped back 5000s
+        result = cache.update()  # re-caps the window to <= now + MAX_BACKOFF
+        self.assertIsNone(result.data)  # backoff itself still holds
+        self.assertLessEqual(cache.rate_limit_remaining, 900.0)
+
+        # ...but only for MAX_BACKOFF from the new "now", not for the step size.
+        mock_time.time.return_value = 5000.0 + 901
         mock_fetch.return_value = _SUCCESS_DATA
         result = cache.update()
         self.assertIsNotNone(result.data)

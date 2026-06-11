@@ -22,6 +22,8 @@ dist/
 .claude/settings.json
 .claude/settings.local.json
 .claude/launch.json
+.claude/SESSION_STATE.md
+.claude/worktrees/
 
 # User settings
 usage-monitor-settings.json

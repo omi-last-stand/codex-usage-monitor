@@ -89,7 +89,21 @@ class UsageCache:
 
     @property
     def last_success_time(self) -> float | None:
-        return self._last_success_time
+        lst = self._last_success_time
+        if lst is not None and lst > time.time():
+            # The wall clock stepped BACKWARDS since the last success, leaving
+            # the anchor in the future: every duration computed from it (poll
+            # scheduling, popup "Xs ago", refresh checks) would go negative and
+            # stall for the size of the step. Self-heal to "one cooldown ago"
+            # so readers see an expired cooldown and refresh promptly.
+            # (This anchor is part of the popup's wall-clock contract, so it
+            # cannot simply move to time.monotonic().)
+            with self._state_lock:
+                if self._last_success_time is not None and self._last_success_time > time.time():
+                    self._last_success_time = time.time() - POLL_FAST
+                    self._version += 1
+                lst = self._last_success_time
+        return lst
 
     @property
     def refreshing(self) -> bool:
@@ -116,6 +130,7 @@ class UsageCache:
     @property
     def snapshot(self) -> CacheSnapshot:
         """Return a consistent snapshot for the popup to display."""
+        _ = self.last_success_time  # heals a backward-clock anchor before locking
         with self._state_lock:
             return CacheSnapshot(
                 usage=self._usage,
@@ -181,10 +196,26 @@ class UsageCache:
 
     def _update_locked(self) -> UpdateResult:
         """Execute the actual update while holding ``_lock``."""
-        if self._last_success_time is not None and time.time() - self._last_success_time < POLL_FAST:
-            log.debug('update skipped (cooldown, %.0fs remaining)', POLL_FAST - (time.time() - self._last_success_time))
-            return UpdateResult(data=None)
+        if self._last_success_time is not None:
+            elapsed = time.time() - self._last_success_time
+            if elapsed < 0:
+                # The wall clock stepped BACKWARDS (manual change, VM resume,
+                # large NTP step): a negative elapsed would freeze the cooldown
+                # - silently serving stale data - until wall time re-passes the
+                # old anchor. Re-anchor so the cooldown is simply expired.
+                # (last_success_time is part of the popup's wall-clock status
+                # contract, so it cannot move to time.monotonic().)
+                with self._state_lock:
+                    self._last_success_time = time.time() - POLL_FAST
+                    self._version += 1
+            elif elapsed < POLL_FAST:
+                log.debug('update skipped (cooldown, %.0fs remaining)', POLL_FAST - elapsed)
+                return UpdateResult(data=None)
 
+        if self._rate_limit_until - time.time() > MAX_BACKOFF:
+            # Backward clock step during a backoff: never honor more than the
+            # configured maximum from now.
+            self._rate_limit_until = time.time() + MAX_BACKOFF
         if time.time() < self._rate_limit_until:
             log.debug('update skipped (rate-limit backoff, %.0fs remaining)', self._rate_limit_until - time.time())
             return UpdateResult(data=None)

@@ -106,7 +106,7 @@ def show_info_dialog(
     heading: str,
     content: str,
     *,
-    on_link: Callable[[str], None] | None = None,
+    on_link: Callable[[str], object] | None = None,
 ) -> bool:
     """Show a native info dialog; return ``True`` if shown as a task dialog.
 

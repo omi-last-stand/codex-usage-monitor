@@ -100,6 +100,31 @@ class TestDetectLangCode(unittest.TestCase):
         """Windows-style name with manual override resolves correctly."""
         self.assertEqual(detect_lang_code('Ukrainian_Ukraine'), 'uk')
 
+    def test_chinese_simplified_windows_name(self, _mock_norm):
+        """The Windows legacy name has no normalize() alias; the manual
+        override must map it (zh-CN users otherwise silently get English)."""
+        self.assertEqual(detect_lang_code('Chinese (Simplified)_China'), 'zh-CN')
+
+    def test_chinese_traditional_windows_name(self, _mock_norm):
+        self.assertEqual(detect_lang_code('Chinese (Traditional)_Taiwan'), 'zh-TW')
+
+    def test_hindi_windows_name(self, _mock_norm):
+        self.assertEqual(detect_lang_code('Hindi_India'), 'hi')
+
+    def test_indonesian_windows_name(self, _mock_norm):
+        self.assertEqual(detect_lang_code('Indonesian_Indonesia'), 'id')
+
+    def test_bcp47_tag_matches_locale_file_directly(self, _mock_norm):
+        """A BCP-47 tag (as returned by GetUserDefaultLocaleName) that names a
+        shipped locale file resolves without any normalization."""
+        self.assertEqual(detect_lang_code('zh-CN'), 'zh-CN')
+        self.assertEqual(detect_lang_code('pt-BR'), 'pt-BR')
+
+    def test_bcp47_tag_without_regional_file_falls_back_to_base(self, _mock_norm):
+        """'ja-JP' has no ja-JP.json; the hyphenated tag still reaches ja.json."""
+        self.assertEqual(detect_lang_code('ja-JP'), 'ja')
+        self.assertEqual(detect_lang_code('de-DE'), 'de')
+
     def test_base_code_without_region(self, _mock_norm):
         """Base language code without region resolves directly."""
         self.assertEqual(detect_lang_code('fr'), 'fr')
@@ -124,9 +149,10 @@ class TestLoadTranslations(unittest.TestCase):
     """Tests for load_translations()."""
 
     @patch('usage_monitor_for_codex.settings.LANGUAGE', '')
+    @patch('usage_monitor_for_codex.i18n._windows_user_locale', return_value='')
     @patch('usage_monitor_for_codex.i18n.locale.normalize', side_effect=_mock_normalize)
     @patch('usage_monitor_for_codex.i18n.locale.getlocale', return_value=('de_DE', 'UTF-8'))
-    def test_loads_detected_locale(self, _mock_get, _mock_norm):
+    def test_loads_detected_locale(self, _mock_get, _mock_norm, _mock_win):
         """Loads the JSON file matching the detected system locale."""
         with TemporaryDirectory() as tmp:
             locale_dir = Path(tmp)
@@ -140,9 +166,10 @@ class TestLoadTranslations(unittest.TestCase):
         self.assertEqual(result['title'], 'Deutsch')
 
     @patch('usage_monitor_for_codex.settings.LANGUAGE', '')
+    @patch('usage_monitor_for_codex.i18n._windows_user_locale', return_value='')
     @patch('usage_monitor_for_codex.i18n.locale.normalize', side_effect=_mock_normalize)
     @patch('usage_monitor_for_codex.i18n.locale.getlocale', return_value=(None, None))
-    def test_none_locale_falls_back_to_english(self, _mock_get, _mock_norm):
+    def test_none_locale_falls_back_to_english(self, _mock_get, _mock_norm, _mock_win):
         """None from getlocale() falls back to English."""
         with TemporaryDirectory() as tmp:
             locale_dir = Path(tmp)
@@ -169,9 +196,10 @@ class TestLoadTranslations(unittest.TestCase):
         self.assertEqual(result['title'], 'Japanese')
 
     @patch('usage_monitor_for_codex.settings.LANGUAGE', 'xx')
+    @patch('usage_monitor_for_codex.i18n._windows_user_locale', return_value='')
     @patch('usage_monitor_for_codex.i18n.locale.normalize', side_effect=_mock_normalize)
     @patch('usage_monitor_for_codex.i18n.locale.getlocale', return_value=('de_DE', 'UTF-8'))
-    def test_invalid_language_setting_falls_back_to_locale(self, _mock_get, _mock_norm):
+    def test_invalid_language_setting_falls_back_to_locale(self, _mock_get, _mock_norm, _mock_win):
         """Invalid LANGUAGE setting falls back to locale detection."""
         with TemporaryDirectory() as tmp:
             locale_dir = Path(tmp)
@@ -184,6 +212,39 @@ class TestLoadTranslations(unittest.TestCase):
 
         self.assertEqual(result['title'], 'Deutsch')
 
+
+    @patch('usage_monitor_for_codex.settings.LANGUAGE', '')
+    @patch('usage_monitor_for_codex.i18n._windows_user_locale', return_value='de-DE')
+    @patch('usage_monitor_for_codex.i18n.locale.getlocale', side_effect=AssertionError('must not be consulted'))
+    def test_windows_user_locale_takes_priority(self, _mock_get, _mock_win):
+        """GetUserDefaultLocaleName (BCP-47) is the primary signal; the legacy
+        CRT getlocale() name is only a fallback."""
+        with TemporaryDirectory() as tmp:
+            locale_dir = Path(tmp)
+            (locale_dir / 'en.json').write_text('{"title": "English"}')
+            (locale_dir / 'de.json').write_text('{"title": "Deutsch"}')
+
+            with patch('usage_monitor_for_codex.i18n.LOCALE_DIR', locale_dir), \
+                 patch('usage_monitor_for_codex.widget_state.load_language', return_value=''):
+                result = load_translations()
+
+        self.assertEqual(result['title'], 'Deutsch')
+
+    @patch('usage_monitor_for_codex.settings.LANGUAGE', '')
+    @patch('usage_monitor_for_codex.i18n._windows_user_locale', return_value='')
+    @patch('usage_monitor_for_codex.i18n.locale.getlocale', side_effect=ValueError('unknown locale: zh-CN'))
+    def test_getlocale_valueerror_falls_back_to_english(self, _mock_get, _mock_win):
+        """getlocale() can raise ValueError (e.g. LC_CTYPE holding a BCP-47
+        tag); this runs at module import and must never propagate."""
+        with TemporaryDirectory() as tmp:
+            locale_dir = Path(tmp)
+            (locale_dir / 'en.json').write_text('{"title": "English"}')
+
+            with patch('usage_monitor_for_codex.i18n.LOCALE_DIR', locale_dir), \
+                 patch('usage_monitor_for_codex.widget_state.load_language', return_value=''):
+                result = load_translations()
+
+        self.assertEqual(result['title'], 'English')
 
     def test_widget_language_overrides_json_and_locale(self):
         """The language saved from the settings window wins over JSON and locale."""

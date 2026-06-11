@@ -117,7 +117,7 @@ def _shot(page, path: Path, width: int) -> None:
 
 
 def render_popup(page, lang: str, L: dict, *, expanded: bool, menu: bool, out: Path) -> None:
-    cfg = {'colors': COLORS, 't': popup_t(L), 'app_version': '1.0.0',
+    cfg = {'colors': COLORS, 't': popup_t(L), 'app_version': '1.0.1',
            'always_on_top': True, 'expanded': expanded, 'data': popup_data(lang)}
     page.set_viewport_size({'width': 340, 'height': 900})
     page.goto(f'{BASE}/popup.html')

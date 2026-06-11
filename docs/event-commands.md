@@ -173,7 +173,7 @@ Available in all event commands:
 
 | Variable | Example | Description |
 |---|---|---|
-| `USAGE_MONITOR_VERSION` | `1.0.0` | Running app version |
+| `USAGE_MONITOR_VERSION` | `1.0.1` | Running app version |
 
 ### `on_reset_command`
 

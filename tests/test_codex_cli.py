@@ -226,6 +226,32 @@ class TestCliVersion(unittest.TestCase):
         with patch('pathlib.Path.stat', side_effect=OSError('not found')):
             self.assertEqual(cli_version(Path('/fake/codex.exe')), '')
 
+    @patch('usage_monitor_for_codex.codex_cli.subprocess.run')
+    @patch('pathlib.Path.stat', return_value=MagicMock(st_mtime=1000.0))
+    def test_timeout_failure_is_cached(self, _mock_stat, mock_run):
+        """A hanging/erroring probe is cached per binary mtime like a
+        versionless one - cli_version runs on EVERY usage fetch (User-Agent)
+        and popup refresh, so a broken binary must not re-block for the full
+        10 s timeout each time."""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd='codex', timeout=10)
+        path = Path('/fake/codex.exe')
+        self.assertEqual(cli_version(path), '')
+        self.assertEqual(cli_version(path), '')
+        mock_run.assert_called_once()
+
+    @patch('usage_monitor_for_codex.codex_cli.subprocess.run')
+    def test_failure_cache_invalidated_on_mtime_change(self, mock_run):
+        """A cached failure is re-probed once the binary changes (mtime)."""
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd='codex', timeout=10)
+        path = Path('/fake/codex.exe')
+        with patch('pathlib.Path.stat', return_value=MagicMock(st_mtime=1000.0)):
+            self.assertEqual(cli_version(path), '')
+        mock_run.side_effect = None
+        mock_run.return_value = MagicMock(stdout='codex-cli 0.6.0\n', stderr='', returncode=0)
+        with patch('pathlib.Path.stat', return_value=MagicMock(st_mtime=2000.0)):
+            self.assertEqual(cli_version(path), '0.6.0')
+        self.assertEqual(mock_run.call_count, 2)
+
 
 # ---------------------------------------------------------------------------
 # find_installations
@@ -300,6 +326,26 @@ class TestFindInstallations(unittest.TestCase):
                 result = find_installations()
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].version, '0.5.0')
+
+    @patch('usage_monitor_for_codex.codex_cli.cli_version', return_value='')
+    @patch('usage_monitor_for_codex.codex_cli.CODEX_CLI_PATH')
+    def test_enumeration_error_skips_dir_not_caller(self, mock_cli_path, _mock_version):
+        """iterdir() can fail even after is_dir() (ACL denial, cloud placeholder,
+        dir deleted in between). One bad extension dir must be skipped - the
+        exception otherwise kills the popup's update loop, which calls this
+        unguarded."""
+        mock_cli_path.is_file.return_value = False
+        bad_dir = MagicMock(spec=Path)
+        bad_dir.is_dir.return_value = True
+        bad_dir.iterdir.side_effect = PermissionError('denied')
+        with TemporaryDirectory() as tmp:
+            good_dir = Path(tmp)
+            (good_dir / 'openai.codex-0.5.0-win32-x64').mkdir()
+            dirs = [('Broken IDE', bad_dir), ('VS Code', good_dir)]
+            with patch('usage_monitor_for_codex.codex_cli._EXTENSION_DIRS', dirs):
+                result = find_installations()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].name, 'VS Code')
 
     @patch('usage_monitor_for_codex.codex_cli.cli_version', return_value='')
     @patch('usage_monitor_for_codex.codex_cli.CODEX_CLI_PATH')

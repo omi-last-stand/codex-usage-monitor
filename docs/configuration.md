@@ -155,7 +155,8 @@ The defaults are the signature Codex palette: a near-black indigo background wit
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `bg` | `"#12101b"` | Background |
+| `bg` | `"#0f1838"` | Background — gradient start, also the solid native-window backing (must be `#RGB` or `#RRGGBB` hex) |
+| `bg2` | `"#1e1247"` | Background — gradient end |
 | `fg` | `"#cbc9d6"` | Text |
 | `fg_dim` | `"#8a879c"` | Dimmed text (labels, reset times) |
 | `fg_heading` | `"#ffffff"` | Section headings |
@@ -167,7 +168,7 @@ The defaults are the signature Codex palette: a near-black indigo background wit
 | `bar_divider` | `"#000c"` | Midnight divider on weekly progress bars |
 | `bar_marker` | `"#fffc"` | Time-position marker on progress bars |
 
-Each usage bar is drawn as a gradient from `bar_fg_start` to `bar_fg`. Set both to the same value for a flat, single-color fill.
+Each usage bar is drawn as a gradient from `bar_fg_start` to `bar_fg`, and the widget background as a gradient from `bg` to `bg2`. Set both keys of a pair to the same value for a flat, single-color fill.
 
 ## Widget
 

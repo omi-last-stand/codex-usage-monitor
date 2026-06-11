@@ -86,7 +86,10 @@ def _read_auth() -> dict[str, Any]:
     if not CODEX_AUTH.exists():
         return {}
     try:
-        data = json.loads(CODEX_AUTH.read_text(encoding='utf-8'))
+        # utf-8-sig: tolerate a UTF-8 BOM (PowerShell 5.1's Set-Content -Encoding
+        # UTF8 writes one) - json.loads rejects it, which would silently read as
+        # "no token" while the credentials are perfectly valid.
+        data = json.loads(CODEX_AUTH.read_text(encoding='utf-8-sig'))
         return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError, ValueError):
         return {}
@@ -259,7 +262,8 @@ def _fetch_usage_api() -> dict[str, Any]:
     # The wham/usage response is a RateLimitStatusPayload with rate_limit /
     # credits / plan_type at the top level; some deployments may wrap it under
     # "rate_limits". transform_rate_limits handles either nesting.
-    obj = payload.get('rate_limits') if isinstance(payload.get('rate_limits'), dict) else payload
+    nested = payload.get('rate_limits')
+    obj = nested if isinstance(nested, dict) else payload
     result = transform_rate_limits(obj)
     # Keep a credits-only live response: the official client tolerates a payload
     # whose primary rate_limit is absent, and discarding a valid credit balance
@@ -561,7 +565,7 @@ def _latest_session_rate_limits(max_files: int = 40) -> tuple[str | None, dict[s
     # dict.fromkeys dedups while preserving the mtime-first ordering.
     files = list(dict.fromkeys(by_mtime + by_path))
 
-    best: tuple[datetime, str, dict[str, Any]] | None = None
+    best: tuple[datetime, str | None, dict[str, Any]] | None = None
     fallback: tuple[str | None, dict[str, Any]] | None = None
     for path in files:
         ts_str, snapshot = _scan_file_for_rate_limits(path)
@@ -653,7 +657,10 @@ def _decode_jwt_claims(token: str) -> dict[str, Any]:
     is intentionally not verified because the token is read from the
     user's own machine and never trusted for authorization.
     """
-    if not token or token.count('.') < 2:
+    # isinstance: auth.json is external state - a truthy non-string id_token
+    # (number/object/bool from a schema change or hand edit) must degrade to
+    # "no claims", not AttributeError out of every poll.
+    if not isinstance(token, str) or token.count('.') < 2:
         return {}
     try:
         payload_b64 = token.split('.')[1]

@@ -116,6 +116,16 @@ class TestReadAccessToken(unittest.TestCase):
             with patch('usage_monitor_for_codex.codex_api.CODEX_AUTH', auth_file):
                 self.assertIsNone(read_access_token())
 
+    def test_utf8_bom_is_tolerated(self):
+        """A UTF-8 BOM (e.g. PowerShell 5.1 Set-Content -Encoding UTF8) must not
+        turn a valid auth.json into a silent "no token"."""
+        auth = {'tokens': {'access_token': 'codex-access-123'}}
+        with TemporaryDirectory() as tmp:
+            auth_file = Path(tmp) / 'auth.json'
+            auth_file.write_bytes(b'\xef\xbb\xbf' + json.dumps(auth).encode('utf-8'))
+            with patch('usage_monitor_for_codex.codex_api.CODEX_AUTH', auth_file):
+                self.assertEqual(read_access_token(), 'codex-access-123')
+
 
 class TestReadAccountId(unittest.TestCase):
     """Tests for read_account_id()."""
@@ -691,6 +701,30 @@ class TestFetchProfile(unittest.TestCase):
         self.assertEqual(result['account']['uuid'], 'acct-only')
         self.assertEqual(result['account']['email'], '')
         self.assertEqual(result['organization']['organization_type'], '')
+
+    def test_non_string_id_token_does_not_crash(self):
+        """A truthy NON-STRING id_token (number/object/bool - schema drift or a
+        hand edit) must degrade to "no claims", not AttributeError out of every
+        poll (fetch_profile is the first call of the poll loop)."""
+        for bad_token in (12345, {'nested': 'object'}, True):
+            with self.subTest(id_token=bad_token):
+                auth = {'tokens': {'account_id': 'acct-only', 'id_token': bad_token}}
+                with TemporaryDirectory() as tmp:
+                    auth_file = self._write_auth(tmp, auth)
+                    with patch('usage_monitor_for_codex.codex_api.CODEX_AUTH', auth_file):
+                        result = fetch_profile()
+
+                assert result is not None
+                self.assertEqual(result['account']['uuid'], 'acct-only')
+                self.assertEqual(result['account']['email'], '')
+
+                # Without a top-level account_id the effective-id lookup walks
+                # into the JWT-claim fallback itself - it must survive too.
+                auth = {'tokens': {'id_token': bad_token}}
+                with TemporaryDirectory() as tmp:
+                    auth_file = self._write_auth(tmp, auth)
+                    with patch('usage_monitor_for_codex.codex_api.CODEX_AUTH', auth_file):
+                        self.assertIsNone(read_effective_account_id())
 
     def test_missing_auth_file_returns_none(self):
         """A missing auth file returns None."""

@@ -99,11 +99,12 @@ class TestEnsureSingleInstance(unittest.TestCase):
         self.assertTrue(result)
         mock_store.assert_called_once()
 
-    @patch(f'{MODULE}._terminate_pid')
+    @patch(f'{MODULE}._terminate_process_handle', return_value=True)
+    @patch(f'{MODULE}._open_pid_for_terminate', return_value=555)
     @patch(f'{MODULE}._read_holder_info', return_value=(99999, '1.9.0'))
     @patch(f'{MODULE}._store_holder_info')
     @patch(f'{MODULE}.ctypes')
-    def test_duplicate_user_accepts_returns_true(self, mock_ctypes, mock_store, mock_read, mock_terminate):
+    def test_duplicate_user_accepts_returns_true(self, mock_ctypes, mock_store, mock_read, mock_open, mock_terminate):
         """Duplicate detected, user clicks Yes - terminates old instance and returns True."""
         # 1st call: duplicate detected (ALREADY_EXISTS); 2nd call (after the mutex
         # is re-created): success, so the replacing instance proceeds.
@@ -112,7 +113,16 @@ class TestEnsureSingleInstance(unittest.TestCase):
         mock_kernel32.CreateMutexW.return_value = 42
 
         mock_user32 = MagicMock()
-        mock_user32.MessageBoxW.return_value = 6  # IDYES
+
+        # The holder handle must be opened BEFORE the dialog blocks: an open
+        # handle pins the PID, so it cannot be recycled to an unrelated process
+        # while the dialog sits unanswered. Asserting from inside the dialog
+        # call proves the ordering.
+        def _dialog_with_order_check(*args):
+            mock_open.assert_called_once_with(99999)
+            return 6  # IDYES
+
+        mock_user32.MessageBoxW.side_effect = _dialog_with_order_check
 
         with patch(f'{MODULE}._kernel32', mock_kernel32), \
              patch(f'{MODULE}.ctypes.windll.user32', mock_user32):
@@ -120,14 +130,16 @@ class TestEnsureSingleInstance(unittest.TestCase):
             result = ensure_single_instance()
 
         self.assertTrue(result)
-        mock_terminate.assert_called_once_with(99999)
+        # Termination goes through the pre-opened handle, never the raw PID.
+        mock_terminate.assert_called_once_with(555)
+        mock_kernel32.CloseHandle.assert_any_call(555)
         self.assertEqual(mock_store.call_count, 1)
 
-    @patch(f'{MODULE}._terminate_pid', return_value=False)
+    @patch(f'{MODULE}._open_pid_for_terminate')
     @patch(f'{MODULE}._read_holder_info', return_value=(None, None))
     @patch(f'{MODULE}._store_holder_info')
     @patch(f'{MODULE}.ctypes')
-    def test_duplicate_replace_fails_when_still_held(self, mock_ctypes, mock_store, mock_read, mock_terminate):
+    def test_duplicate_replace_fails_when_still_held(self, mock_ctypes, mock_store, mock_read, mock_open):
         """If the mutex is still held after the replace attempt (PID unknown or
         termination failed), do NOT start a duplicate: return False and don't store."""
         mock_ctypes.get_last_error.return_value = 0xB7  # still ALREADY_EXISTS after re-create
@@ -144,10 +156,65 @@ class TestEnsureSingleInstance(unittest.TestCase):
 
         self.assertFalse(result)
         mock_store.assert_not_called()
+        # No PID was known, so no process handle is ever opened.
+        mock_open.assert_not_called()
 
+    @patch(f'{MODULE}._read_holder_info')
+    @patch(f'{MODULE}._store_holder_info')
+    @patch(f'{MODULE}.ctypes')
+    def test_mutex_create_failure_fails_closed(self, mock_ctypes, mock_store, mock_read):
+        """CreateMutexW returning NULL (e.g. ERROR_ACCESS_DENIED because the
+        mutex belongs to an ELEVATED instance) must NOT be treated as "first
+        instance" - that would run two instances side by side and double-fire
+        event commands. The guard fails closed: dialog + exit."""
+        mock_ctypes.get_last_error.return_value = 5  # ERROR_ACCESS_DENIED
+        mock_kernel32 = MagicMock()
+        mock_kernel32.CreateMutexW.return_value = 0  # NULL: create/open failed
+
+        mock_user32 = MagicMock()
+
+        with patch(f'{MODULE}._kernel32', mock_kernel32), \
+             patch(f'{MODULE}.ctypes.windll.user32', mock_user32):
+            import usage_monitor_for_codex.single_instance as si
+            result = si.ensure_single_instance()
+
+        self.assertFalse(result)
+        mock_store.assert_not_called()
+        mock_read.assert_not_called()
+        mock_user32.MessageBoxW.assert_called_once()
+        self.assertIsNone(si._mutex_handle)
+
+    @patch(f'{MODULE}._terminate_process_handle', return_value=True)
+    @patch(f'{MODULE}._open_pid_for_terminate', return_value=555)
+    @patch(f'{MODULE}._read_holder_info', return_value=(99999, '1.9.0'))
+    @patch(f'{MODULE}._store_holder_info')
+    @patch(f'{MODULE}.ctypes')
+    def test_reacquire_create_failure_fails_closed(self, mock_ctypes, mock_store, mock_read, mock_open, mock_terminate):
+        """If the post-replace re-acquire CreateMutexW fails outright (NULL),
+        the old instance may still be alive behind an unopenable mutex - do
+        not start a duplicate."""
+        mock_ctypes.get_last_error.return_value = 0xB7
+        mock_kernel32 = MagicMock()
+        mock_kernel32.CreateMutexW.side_effect = [42, 0]  # ask-dialog pass, then NULL
+
+        mock_user32 = MagicMock()
+        mock_user32.MessageBoxW.return_value = 6  # IDYES
+
+        with patch(f'{MODULE}._kernel32', mock_kernel32), \
+             patch(f'{MODULE}.ctypes.windll.user32', mock_user32):
+            import usage_monitor_for_codex.single_instance as si
+            result = si.ensure_single_instance()
+
+        self.assertFalse(result)
+        mock_store.assert_not_called()
+        # Ask dialog + replace_failed notice.
+        self.assertEqual(mock_user32.MessageBoxW.call_count, 2)
+        self.assertIsNone(si._mutex_handle)
+
+    @patch(f'{MODULE}._open_pid_for_terminate', return_value=555)
     @patch(f'{MODULE}._read_holder_info', return_value=(99999, '1.9.0'))
     @patch(f'{MODULE}.ctypes')
-    def test_duplicate_user_declines_returns_false(self, mock_ctypes, mock_read):
+    def test_duplicate_user_declines_returns_false(self, mock_ctypes, mock_read, mock_open):
         """Duplicate detected, user clicks No - returns False without terminating."""
         mock_ctypes.get_last_error.return_value = 0xB7
         mock_kernel32 = MagicMock()
@@ -162,6 +229,8 @@ class TestEnsureSingleInstance(unittest.TestCase):
             result = ensure_single_instance()
 
         self.assertFalse(result)
+        # The pre-opened holder handle is released on decline.
+        mock_kernel32.CloseHandle.assert_any_call(555)
 
     @patch(f'{MODULE}._read_holder_info', return_value=(99999, '1.9.0'))
     @patch(f'{MODULE}.ctypes')

@@ -1,5 +1,7 @@
-pystray
-Pillow
-requests
-pywebview
-pyinstaller
+# Pinned to the versions the release executable is built with, so a
+# from-source build reproduces the released, reviewed binary.
+pystray==0.19.5
+Pillow==12.2.0
+requests==2.34.2
+pywebview==6.2.1
+pyinstaller==6.20.0

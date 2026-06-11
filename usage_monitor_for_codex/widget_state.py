@@ -84,12 +84,19 @@ def ini_path() -> Path:
 
 def _read() -> configparser.ConfigParser:
     """Return a parser populated from the INI file, or empty when absent."""
-    parser = configparser.ConfigParser()
+    # interpolation=None: the INI sits next to the EXE and invites hand edits;
+    # with the default BasicInterpolation a stray '%' in any value raises
+    # lazily at get() time - escaping every except below, up to module import
+    # (load_language feeds the i18n bootstrap). Values are plain ints/bools/
+    # codes, so interpolation buys nothing.
+    parser = configparser.ConfigParser(interpolation=None)
     path = ini_path()
     if path.is_file():
         try:
             parser.read(path, encoding='utf-8')
-        except (OSError, configparser.Error):
+        except (OSError, ValueError, configparser.Error):
+            # ValueError covers UnicodeDecodeError: a file re-saved as UTF-16
+            # (old Notepad "Unicode") must yield defaults, not kill startup.
             pass
 
     return parser

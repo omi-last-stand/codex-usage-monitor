@@ -20,6 +20,7 @@ import ctypes
 import json
 import locale as _locale
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -47,6 +48,13 @@ _NUMERIC_BOUNDS: dict[str, int] = {
     'idle_pause': 0,
 }
 _COLOR_KEYS = frozenset({'bg', 'bg2', 'fg', 'fg_dim', 'fg_heading', 'fg_link', 'bar_bg', 'bar_fg', 'bar_fg_start', 'bar_fg_warn', 'bar_divider', 'bar_marker'})
+# pywebview validates create_window(background_color=...) against exactly this
+# shape and RAISES on anything else - an invalid 'bg' would silently kill the
+# widget/settings window in their daemon threads. The other color keys feed
+# only CSS, where an invalid value (or 4/8-digit hex like the '#000c' default
+# for bar_divider) degrades gracefully, so they stay free-form strings.
+_STRICT_HEX_RE = re.compile(r'^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$')
+_STRICT_HEX_KEYS = frozenset({'bg'})
 _THRESHOLD_KEY_PREFIX = 'alert_thresholds_'
 _PERCENT_KEYS = frozenset({'alert_time_aware_below'})
 _STRING_KEYS = frozenset({'currency_symbol', 'language', 'usage_source'})
@@ -111,6 +119,9 @@ def _validate(data: dict, path: Path) -> dict:
         elif key in _COLOR_KEYS:
             if not isinstance(value, str):
                 errors.append(f'  {key}: expected a color string, got {type(value).__name__}')
+                drop.append(key)
+            elif key in _STRICT_HEX_KEYS and not _STRICT_HEX_RE.match(value):
+                errors.append(f"  {key}: must be '#RGB' or '#RRGGBB' hex (it backs the native window), got {value!r}")
                 drop.append(key)
 
         elif key.startswith(_THRESHOLD_KEY_PREFIX):

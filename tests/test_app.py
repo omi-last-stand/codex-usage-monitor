@@ -8,7 +8,7 @@ tray rendering, polling interval, and reset notifications.
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from usage_monitor_for_codex.app import UsageMonitorForCodex
@@ -1231,6 +1231,113 @@ class TestResetAlignment(unittest.TestCase):
             self.app._calculate_poll_interval()
 
         self.assertGreaterEqual(self.app._fast_polls_remaining, 2)
+
+    def test_error_retry_not_slowed_by_alignment(self):
+        """Alignment applies to HEALTHY responses only: with the API erroring
+        and a reset imminent, the POLL_ERROR retry (30s) must not be stretched
+        to >= POLL_FAST (120s) - error recovery and the post-reset reading are
+        both time-critical."""
+        self.app._last_response = {'error': 'HTTP 500'}
+        with patch.object(self.app, '_seconds_until_next_reset', return_value=20.0):
+            interval = self.app._calculate_poll_interval()
+
+        self.assertEqual(interval, 30)  # POLL_ERROR, not max(25, POLL_FAST)
+
+    def test_rate_limit_backoff_not_shortened_by_alignment(self):
+        """A rate-limit backoff must never be shortened below the server's
+        Retry-After by reset alignment."""
+        self.app._last_response = {'error': 'HTTP 429', 'rate_limited': True}
+        self.app.cache = MagicMock()
+        self.app.cache.rate_limit_remaining = 600.0
+        with patch.object(self.app, '_seconds_until_next_reset', return_value=300.0):
+            interval = self.app._calculate_poll_interval()
+
+        self.assertEqual(interval, 600)
+
+
+# ---------------------------------------------------------------------------
+# Same-deadline tolerance (shared by dip classifier, Phase 4, reset-confirmed)
+# ---------------------------------------------------------------------------
+
+class TestSameDeadline(unittest.TestCase):
+    """Tests for _same_deadline() tolerance semantics."""
+
+    def setUp(self):
+        self.app = _make_app()
+
+    def tearDown(self):
+        _cleanup(self.app)
+
+    def test_identical_strings_match(self):
+        self.assertTrue(self.app._same_deadline('2026-06-11T10:00:00+00:00', '2026-06-11T10:00:00+00:00'))
+
+    def test_seconds_scale_drift_matches(self):
+        """Relative-countdown payloads re-derive resets_at each poll; a
+        seconds-scale drift is the SAME period boundary."""
+        self.assertTrue(self.app._same_deadline('2026-06-11T10:00:00+00:00', '2026-06-11T10:00:31+00:00'))
+
+    def test_beyond_tolerance_differs(self):
+        self.assertFalse(self.app._same_deadline('2026-06-11T10:00:00+00:00', '2026-06-11T10:11:00+00:00'))
+
+    def test_full_window_jump_differs(self):
+        """A genuine reset advances the deadline by a whole window (>= 5h)."""
+        self.assertFalse(self.app._same_deadline('2026-06-11T10:00:00+00:00', '2026-06-11T15:00:00+00:00'))
+
+    def test_none_or_empty_never_match(self):
+        self.assertFalse(self.app._same_deadline(None, '2026-06-11T10:00:00+00:00'))
+        self.assertFalse(self.app._same_deadline('2026-06-11T10:00:00+00:00', None))
+        self.assertFalse(self.app._same_deadline('', ''))
+
+
+# ---------------------------------------------------------------------------
+# Idle wake for an overdue, unconfirmed reset (deadline passed while active)
+# ---------------------------------------------------------------------------
+
+class TestHasUnconfirmedOverdue(unittest.TestCase):
+    """Tests for _has_unconfirmed_overdue() - the idle-wake predicate."""
+
+    def setUp(self):
+        self.app = _make_app()
+        self.past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        self.future = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+
+    def tearDown(self):
+        _cleanup(self.app)
+
+    def test_overdue_high_unconfirmed_is_pending(self):
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.past}}
+        self.assertTrue(self.app._has_unconfirmed_overdue())
+
+    def test_future_deadline_is_not_pending(self):
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.future}}
+        self.assertFalse(self.app._has_unconfirmed_overdue())
+
+    def test_low_utilization_is_not_pending(self):
+        """Below the reset threshold no command can fire - nothing to await."""
+        self.app._prev_entries = {'five_hour': {'utilization': 50.0, 'resets_at': self.past}}
+        self.assertFalse(self.app._has_unconfirmed_overdue())
+
+    def test_day_window_uses_98_threshold(self):
+        self.app._prev_entries = {'seven_day': {'utilization': 98.5, 'resets_at': self.past}}
+        self.assertTrue(self.app._has_unconfirmed_overdue())
+        self.app._prev_entries = {'seven_day': {'utilization': 97.0, 'resets_at': self.past}}
+        self.assertFalse(self.app._has_unconfirmed_overdue())
+
+    def test_confirmed_deadline_is_not_pending(self):
+        """A reset already recorded confirmed for (essentially) this deadline
+        must not hold the idle retry open."""
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': self.past}}
+        self.app._reset_confirmed = {'five_hour': self.past}
+        self.assertFalse(self.app._has_unconfirmed_overdue())
+
+    def test_unparseable_key_is_not_pending(self):
+        """Phase 1 cannot fire for a fallback slot key; mirror its parse gate."""
+        self.app._prev_entries = {'primary': {'utilization': 99.0, 'resets_at': self.past}}
+        self.assertFalse(self.app._has_unconfirmed_overdue())
+
+    def test_missing_deadline_is_not_pending(self):
+        self.app._prev_entries = {'five_hour': {'utilization': 99.0, 'resets_at': ''}}
+        self.assertFalse(self.app._has_unconfirmed_overdue())
 
 
 # ---------------------------------------------------------------------------
@@ -2612,6 +2719,46 @@ class TestPollLoopIdleInterruption(unittest.TestCase):
         # Second wait used POLL_INTERVAL deadline (not None)
         self.assertAlmostEqual(wait_calls[1], 380.0, places=0)
 
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['echo reset'])
+    @patch('usage_monitor_for_codex.app.POLL_INTERVAL', 180)
+    @patch('usage_monitor_for_codex.app.time.sleep')
+    @patch('usage_monitor_for_codex.app.time.time')
+    def test_idle_wakes_for_deadline_that_passed_while_active(self, mock_time, mock_sleep):
+        """A reset deadline that passed while the user was still ACTIVE (so the
+        away-branch never armed _idle_reset_pending) must still arm a retry
+        wake when the user then locks: _seconds_until_next_reset() ignores past
+        deadlines, so without _has_unconfirmed_overdue() the idle wait would
+        block with NO deadline and on_reset_command would fire only on the
+        user's return - violating docs/event-commands.md ("fires promptly even
+        if the computer is unattended")."""
+        wait_calls = []
+
+        def capture_wait(until=None):
+            wait_calls.append(until)
+            self.app.running = False
+
+        # Retained, verified, near-exhausted window whose deadline has PASSED;
+        # the user locked before any poll evaluated it: pending is still False.
+        past = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+        self.app._prev_entries = {'five_hour': {'utilization': 97.0, 'resets_at': past}}
+        self.app._idle_reset_pending = False
+
+        mock_time.side_effect = [
+            100.0,   # target = time() + interval
+            100.0,   # inner loop: time() < target
+            200.0,   # deadline calc (_has_unconfirmed_overdue path): time() + 180
+        ]
+
+        with patch.object(self.app, 'update'), \
+             patch.object(self.app, '_calculate_poll_interval', return_value=180), \
+             patch.object(self.app, '_is_user_away', return_value=True), \
+             patch.object(self.app, '_wait_for_activity', side_effect=capture_wait):
+            self.app.poll_loop()
+
+        # The wait got a POLL_INTERVAL retry deadline, not None.
+        self.assertEqual(len(wait_calls), 1)
+        self.assertAlmostEqual(wait_calls[0], 380.0, places=0)
+
 
 class TestIdleResetPendingCleared(unittest.TestCase):
     """Tests for _idle_reset_pending being cleared on confirmed usage drop."""
@@ -3198,6 +3345,159 @@ class TestStartupCommand(unittest.TestCase):
         self.assertEqual(env['USAGE_MONITOR_RESETS_AT_FIVE_HOUR'], '')
         self.assertEqual(env['USAGE_MONITOR_UTILIZATION_FIVE_HOUR'], '0')
         self.assertNotEqual(env['USAGE_MONITOR_RESETS_AT_SEVEN_DAY'], '')
+
+
+class TestDeadlinelessGhostAgeing(unittest.TestCase):
+    """A deadline-less retained window must stop suppressing other windows'
+    reset events once it has been absent longer than its own window length."""
+
+    def setUp(self):
+        self.app = _make_app()
+        self._cmd_patch = patch('usage_monitor_for_codex.app.run_event_command')
+        self._cmd = self._cmd_patch.start()
+
+    def tearDown(self):
+        self._cmd_patch.stop()
+        _cleanup(self.app)
+
+    def _feed(self, data: dict) -> None:
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.return_value = UpdateResult(
+            data={**data, 'source': 'api', 'account_id': 'acct-A'})
+        self.app.update()
+
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+    def test_ghost_blocks_within_window_length(self):
+        """Within its own window length the last-known 99 still blocks
+        (transient partial omission, review 1919)."""
+        self._feed({'five_hour': {'utilization': 97.0, 'resets_at': ''},
+                    'seven_day': {'utilization': 99.0, 'resets_at': ''}})
+        self._cmd.reset_mock()
+        # seven_day omitted, five_hour drops: recently-absent ghost still blocks.
+        self._feed({'five_hour': {'utilization': 5.0, 'resets_at': ''}})
+        self.assertFalse(any(
+            c[0][1].get('USAGE_MONITOR_EVENT') == 'reset' for c in self._cmd.call_args_list))
+
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+    def test_ghost_retired_after_window_length_stops_blocking(self):
+        """Once absent for longer than its own window length the ghost's period
+        has CERTAINLY ended (no window outlives its length): it is retired and
+        a sibling's genuine reset fires again - without this, a >=99 deadline-
+        less ghost suppressed every other reset FOREVER."""
+        self._feed({'five_hour': {'utilization': 97.0, 'resets_at': ''},
+                    'seven_day': {'utilization': 99.0, 'resets_at': ''}})
+        # seven_day vanishes; first absence stamps _absent_since.
+        self._feed({'five_hour': {'utilization': 97.5, 'resets_at': ''}})
+        self.assertIn('seven_day', self.app._absent_since)
+        # Simulate 7+ days of absence, then another verified poll: retired.
+        self.app._absent_since['seven_day'] = datetime.now(timezone.utc) - timedelta(days=7, hours=1)
+        self._feed({'five_hour': {'utilization': 98.0, 'resets_at': ''}})
+        self.assertNotIn('seven_day', self.app._prev_utilization)
+        self.assertNotIn('seven_day', self.app._prev_entries)
+        self._cmd.reset_mock()
+        # five_hour now genuinely resets: no ghost left to block it.
+        self._feed({'five_hour': {'utilization': 5.0, 'resets_at': ''}})
+        self.assertTrue(any(
+            c[0][1].get('USAGE_MONITOR_EVENT') == 'reset' for c in self._cmd.call_args_list))
+
+    @patch('usage_monitor_for_codex.app.ON_RESET_COMMAND', ['reset.bat'])
+    def test_sibling_reset_in_same_poll_as_ghost_ageout_fires(self):
+        """The ghost must be retired BEFORE the blocking view is snapshotted:
+        when the ghost crosses its age horizon on the very poll that also
+        carries a sibling's genuine reset drop, that reset must fire - a
+        suppressed reset command is never replayed, so blocking it here would
+        lose it permanently (Codex review of this patch set)."""
+        self._feed({'five_hour': {'utilization': 97.0, 'resets_at': ''},
+                    'seven_day': {'utilization': 99.0, 'resets_at': ''}})
+        # seven_day vanishes and its absence is already past the horizon when
+        # the SAME response shows five_hour's reset drop.
+        self.app._absent_since['seven_day'] = datetime.now(timezone.utc) - timedelta(days=7, hours=1)
+        self._cmd.reset_mock()
+        self._feed({'five_hour': {'utilization': 5.0, 'resets_at': ''}})
+        self.assertTrue(any(
+            c[0][1].get('USAGE_MONITOR_EVENT') == 'reset' for c in self._cmd.call_args_list))
+        self.assertNotIn('seven_day', self.app._prev_utilization)
+
+    def test_absence_mark_cleared_when_window_returns(self):
+        """A window present again clears its absence mark - only CONTINUOUS
+        absence ages a ghost out."""
+        self._feed({'five_hour': {'utilization': 50.0, 'resets_at': ''},
+                    'seven_day': {'utilization': 60.0, 'resets_at': ''}})
+        self._feed({'five_hour': {'utilization': 51.0, 'resets_at': ''}})
+        self.assertIn('seven_day', self.app._absent_since)
+        self._feed({'five_hour': {'utilization': 52.0, 'resets_at': ''},
+                    'seven_day': {'utilization': 61.0, 'resets_at': ''}})
+        self.assertNotIn('seven_day', self.app._absent_since)
+
+
+class TestDriftingOverdueDeadline(unittest.TestCase):
+    """Phase 4's same-period KEEP guard must tolerate a relative-countdown
+    deadline that drifts by seconds between polls (same boundary, different
+    string) - byte-equality would retire/re-seed the baseline every poll and
+    re-fire the same threshold toast each time."""
+
+    def setUp(self):
+        self.app = _make_app(thresholds=[80, 95])
+        self._cmd_patch = patch('usage_monitor_for_codex.app.run_event_command')
+        self._cmd = self._cmd_patch.start()
+
+    def tearDown(self):
+        self._cmd_patch.stop()
+        _cleanup(self.app)
+
+    def _feed(self, util: float, resets_at: str) -> None:
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'account': {'uuid': 'acct-A', 'email': 'a@example.com'}}
+        self.app.cache.update.return_value = UpdateResult(
+            data={'five_hour': {'utilization': util, 'resets_at': resets_at},
+                  'source': 'api', 'account_id': 'acct-A'})
+        self.app.update()
+
+    @patch('usage_monitor_for_codex.app.ALERT_TIME_AWARE', False)
+    def test_lingering_overdue_with_drift_does_not_respam_threshold(self):
+        """A 97% window lingering past its deadline under a seconds-drifting
+        deadline string must notify the 95 threshold ONCE, not once per poll."""
+        base = datetime.now(timezone.utc) - timedelta(minutes=5)  # already passed
+        self._feed(97.0, base.isoformat())
+        notify_count_after_first = self.app.icon.notify.call_count
+        # Three more polls, same lingering value, deadline drifting by seconds.
+        for drift in (7, 13, 21):
+            self._feed(97.0, (base + timedelta(seconds=drift)).isoformat())
+        self.assertEqual(self.app.icon.notify.call_count, notify_count_after_first)
+        # The baseline survived (KEEP), it was not retired/re-seeded each poll.
+        self.assertIn('five_hour', self.app._prev_utilization)
+
+
+class TestDeferredNotificationFlushReentrancy(unittest.TestCase):
+    """_flush_deferred_notifications must survive a concurrent defer."""
+
+    def setUp(self):
+        self.app = _make_app()
+
+    def tearDown(self):
+        _cleanup(self.app)
+
+    def test_flush_survives_insert_during_notify(self):
+        """A deferral landing while the flush is mid-drain (popup-thread
+        update() racing the poll thread) must not raise RuntimeError - with
+        dict iteration it would, killing the poll loop - and the late item is
+        drained too."""
+        self.app._deferred_notifications['reset'] = ('m1', 't1')
+        self.app._deferred_notifications['threshold_five_hour'] = ('m2', 't2')
+        inserted = []
+
+        def notify_side_effect(message, title):
+            if not inserted:
+                inserted.append(True)
+                # Simulates _notify_or_defer() from another thread mid-flush.
+                self.app._deferred_notifications['late'] = ('m3', 't3')
+
+        self.app.icon.notify.side_effect = notify_side_effect
+        self.app._flush_deferred_notifications()  # must not raise
+
+        self.assertEqual(self.app.icon.notify.call_count, 3)
+        self.assertEqual(self.app._deferred_notifications, {})
 
 
 class TestSourceSwitchGuard(unittest.TestCase):

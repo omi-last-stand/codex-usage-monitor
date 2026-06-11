@@ -10,6 +10,67 @@ Codex Usage Monitor is an adaptation of
 which is itself a fork of
 [Usage Monitor for Claude](https://github.com/jens-duttke/usage-monitor-for-claude) by Jens Duttke.
 
+## [1.0.1] - 2026-06-11
+
+Maintenance release. A fresh full-codebase audit (five parallel deep reviews plus a
+clean `pyright` static type check) hardened startup, eventing, and data handling.
+No new features, no settings changes required.
+
+### Fixed
+
+- **Reset commands while away**: when a quota deadline passed while you were still
+  active and you locked the machine before the next poll, the idle wake never armed
+  and `on_reset_command` only fired on your return. The retry now arms from the
+  retained deadline state, so the command fires promptly even unattended
+- **Language auto-detection** on Windows for Simplified Chinese, Traditional Chinese,
+  Hindi, and Indonesian - these locales silently fell back to English despite shipped
+  translations. The user-default locale is now read as a BCP-47 tag via the Windows
+  API first, with the legacy-name mapping extended as a fallback
+- **Single instance vs. elevation**: launching a normal instance while an elevated
+  ("Run as administrator") one is running no longer starts a duplicate (double
+  polling, double event commands) - the guard now fails closed with a dialog.
+  Replacing a running instance can no longer terminate an unrelated process if the
+  confirmation dialog sat unanswered while Windows recycled the old PID
+- **Startup robustness**: a corrupted or hand-edited `CodexUsageMonitor.ini`
+  (UTF-16 re-save, stray `%`) no longer aborts launch - it falls back to defaults;
+  the DPI-awareness call no longer kills startup on Windows 10 releases before 1703;
+  a widget that fails to open now shows the crash dialog instead of dying silently
+- **Settings validation**: an invalid `bg` color (e.g. `navy`, missing `#`, 8-digit
+  hex) is rejected with the usual settings warning instead of silently preventing
+  the widget and settings windows from ever opening
+- **Credentials parsing**: a malformed `auth.json` with a non-string `id_token` no
+  longer crashes the poll loop; a UTF-8 BOM (e.g. written by PowerShell 5.1
+  `Set-Content -Encoding UTF8`) no longer reads as "no token"
+- **Codex CLI probing**: a hanging `codex --version` no longer re-blocks every poll
+  and popup refresh for its 10-second timeout (failed probes are cached per binary
+  change); an unreadable IDE-extension folder no longer kills the widget's update loop
+- **Reset-event state machine**: a near-exhausted window that disappeared from the
+  API without a reset deadline can no longer suppress other windows' reset events
+  indefinitely (it now ages out after its own window length); threshold notifications
+  no longer re-fire every poll when the server lingers past a reset deadline with a
+  slightly drifting timestamp; deadline comparisons across the reset logic now share
+  one tolerance
+- **Polling**: error retries are no longer slowed from 30 s to 120 s by reset
+  alignment exactly when a reset is imminent, and a rate-limit backoff is never
+  shortened below the server's Retry-After; a backward system-clock step (VM resume,
+  manual change, large NTP step) no longer freezes polling and the fetch cooldown
+  for the size of the step; a rare race in deferred-notification flushing could
+  permanently stop polling
+- **Start with Windows** now resolves the real Startup folder via the Windows
+  known-folder API, so it works with GPO Folder Redirection / roaming profiles;
+  tray **Restart** now keeps command-line flags such as `--verbose`
+
+### Changed
+
+- `requirements.txt` now pins the exact dependency versions the release executable
+  is built with, so a from-source build reproduces the released binary
+- Docs: corrected the `bg` default color (`#0f1838`) and documented the `bg2`
+  background-gradient end; fixed the "check only on weekly resets" example in the
+  update-check guide (the variant guard now actually guards)
+- Internal: `pyright` type check is clean; 47 new regression tests (953 total)
+
+[Show all code changes](https://github.com/omi-last-stand/codex-usage-monitor/compare/v1.0.0...v1.0.1)
+
 ## [1.0.0] - 2026-05-26
 
 Initial release of Codex Usage Monitor, adapted from Claude Usage Monitor for OpenAI Codex
